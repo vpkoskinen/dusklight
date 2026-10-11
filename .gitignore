@@ -26,6 +26,9 @@ build/
 .ninja_*
 build.ninja
 
+# NVIDIA DLSS SDK (proprietary; fetched by tools/fetch_dlss_sdk.sh, never commit)
+build/dlss_sdk/
+
 # decompctx output
 ctx.*
 *.ctx

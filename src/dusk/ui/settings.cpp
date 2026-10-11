@@ -339,6 +339,9 @@ const Rml::String kBloomBrightnessHelpText =
 const Rml::String kDepthOfFieldHelpText =
     "Configure the post-processing depth-of-field effect. Classic uses the original depth-of-field pass;"
     " Dusklight uses a higher-quality depth-of-field pass.";
+const Rml::String kAntiAliasingHelpText =
+    "Temporal anti-aliasing (NVIDIA DLAA). Requires an NVIDIA RTX GPU with the Vulkan backend and a "
+    "DLSS-enabled build; unavailable otherwise.";
 const Rml::String kUnlockFramerateHelpText =
     "<br/>Uses inter-frame interpolation to enable higher frame rates.<br/><br/>May introduce minor "
     "visual artifacts or animation glitches.";
@@ -828,6 +831,12 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                 .option = GraphicsOption::DepthOfFieldMode,
                 .title = "Depth of Field",
                 .helpText = kDepthOfFieldHelpText,
+            });
+        graphics_tuner_control(*this, leftPane, rightPane,
+            GraphicsTunerProps{
+                .option = GraphicsOption::AntiAliasing,
+                .title = "Anti-Aliasing",
+                .helpText = kAntiAliasingHelpText,
             });
 
         leftPane.add_section("Rendering");

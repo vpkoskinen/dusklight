@@ -1,11 +1,14 @@
 #include "dusk/settings.h"
 
 #include "dusk/config.hpp"
+#include "dusk/dlss.hpp"
 #include "dusk/game_mode.hpp"
+#include "dusk/logging.h"
 #include "dusk/texture_replacements.hpp"
 #include "dusk/ui/ui.hpp"
 
 #include <aurora/aurora.h>
+#include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
 
 namespace dusk {
@@ -84,6 +87,7 @@ UserSettings g_userSettings = {
         .internalResolutionScale {"game.internalResolutionScale", 0},
         .shadowResolutionMultiplier {"game.shadowResolutionMultiplier", 1},
         .resampler {"game.resampler", Resampler::Bilinear},
+        .antiAliasing {"game.antiAliasing", AntiAliasingMode::Off},
         .enableMapBackground {"game.enableMapBackground", true},
         .disableCutscenePillarboxing {"game.disableCutscenePillarboxing", false},
         .disableLetterboxing {"game.disableLetterboxing", LetterboxMode::Off},
@@ -249,6 +253,58 @@ void applyResampler(Resampler resampler) {
     }
 }
 
+bool isAntiAliasingAvailable() {
+    return dusk::dlss::is_supported();
+}
+
+void applyAntiAliasing(AntiAliasingMode mode) {
+    // DLAA requires render resolution == output resolution; feature creation
+    // happens in the render path once the size is known (Phase E).
+    if (mode == AntiAliasingMode::Off || !dusk::dlss::is_supported()) {
+        dusk::dlss::release();
+        if (mode == AntiAliasingMode::Dlaa) {
+            // Requested but unsupported: log the reason so it is diagnosable.
+            DuskLog.warn("Anti-aliasing: DLAA unavailable ({}); falling back to Off.",
+                dusk::dlss::unavailable_reason());
+        }
+        return;
+    }
+    // Supported: intent recorded; actual NGX feature is created later.
+}
+
+void syncAntiAliasing() {
+    static u32 s_lastWidth = 0, s_lastHeight = 0;
+    const auto mode = getSettings().game.antiAliasing.getValue();
+    if (mode != AntiAliasingMode::Dlaa || !dusk::dlss::is_supported()) {
+        if (s_lastWidth != 0) {
+            dusk::dlss::release();
+            s_lastWidth = s_lastHeight = 0;
+        }
+        return;
+    }
+
+    u32 width = 0, height = 0;
+    AuroraGetRenderSize(&width, &height);
+    if (width == 0 || height == 0) {
+        return;
+    }
+
+    if (width != s_lastWidth || height != s_lastHeight) {
+        if (dusk::dlss::create(width, height, dusk::dlss::Quality::Dlaa)) {
+            DuskLog.info("DLAA: feature created {}x{}", width, height);
+        } else {
+            DuskLog.warn("DLAA: feature creation failed at {}x{}", width, height);
+        }
+        s_lastWidth = width;
+        s_lastHeight = height;
+    }
+
+    // Feed the next frame's sub-pixel projection jitter. The render worker uses
+    // the same stored value in the present-path DLAA evaluate, keeping the
+    // jittered projection and the evaluator in lockstep.
+    dusk::dlss::advance_jitter();
+}
+
 void registerSettings() {
     // Video
     Register(g_userSettings.video.enableFullscreen);
@@ -323,6 +379,8 @@ void registerSettings() {
         [](const int& value, const int&) { applyInternalResolutionScale(value); });
     Register(g_userSettings.game.resampler,
         [](const Resampler& value, const Resampler&) { applyResampler(value); });
+    Register(g_userSettings.game.antiAliasing,
+        [](const AntiAliasingMode& value, const AntiAliasingMode&) { applyAntiAliasing(value); });
     Register(g_userSettings.game.shadowResolutionMultiplier);
     Register(g_userSettings.game.enableMapBackground);
     Register(g_userSettings.game.disableCutscenePillarboxing);

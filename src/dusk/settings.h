@@ -27,6 +27,11 @@ enum class Resampler : int {
     Area = 1,
 };
 
+enum class AntiAliasingMode : u8 {
+    Off = 0,
+    Dlaa = 1,
+};
+
 enum class GameLanguage : u8 {
     English = OS_LANGUAGE_ENGLISH,
     German = OS_LANGUAGE_GERMAN,
@@ -105,6 +110,12 @@ template <>
 struct ConfigEnumRange<Resampler> {
     static constexpr auto min = Resampler::Bilinear;
     static constexpr auto max = Resampler::Area;
+};
+
+template <>
+struct ConfigEnumRange<AntiAliasingMode> {
+    static constexpr auto min = AntiAliasingMode::Off;
+    static constexpr auto max = AntiAliasingMode::Dlaa;
 };
 
 template <>
@@ -249,6 +260,7 @@ struct UserSettings {
         ConfigVar<int> internalResolutionScale;
         ConfigVar<int> shadowResolutionMultiplier;
         ConfigVar<Resampler> resampler;
+        ConfigVar<AntiAliasingMode> antiAliasing;
         ConfigVar<bool> enableMapBackground;
         ConfigVar<bool> disableCutscenePillarboxing;
         ConfigVar<LetterboxMode> disableLetterboxing;
@@ -366,6 +378,15 @@ void registerSettings();
 
 void applyInternalResolutionScale(int scale);
 void applyResampler(Resampler resampler);
+void applyAntiAliasing(AntiAliasingMode mode);
+// Creates/recreates/releases the DLAA NGX feature to match the current
+// anti-aliasing setting and render resolution. Call once per frame; a cheap
+// no-op when DLAA is off or unsupported.
+void syncAntiAliasing();
+
+// True when DLAA can actually run on the current system (NGX runtime present,
+// Dawn/Aurora Vulkan interop exported, NVIDIA Vulkan adapter).
+bool isAntiAliasingAvailable();
 
 inline bool isLetterboxingDisabled(bool inCutscene) {
     const auto mode = getSettings().game.disableLetterboxing.getValue();

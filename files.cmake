@@ -1431,6 +1431,9 @@ set(DUSK_FILES
         src/dusk/data.cpp
         src/dusk/data.hpp
         src/dusk/discord_presence.cpp
+        src/dusk/dlss.cpp
+        src/dusk/dlss.hpp
+        src/dusk/dlss_dawn.cpp
         src/dusk/dvd_asset.cpp
         src/dusk/dvd_asset.hpp
         src/dusk/extras.c

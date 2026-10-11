@@ -73,6 +73,17 @@ Rml::String format_post_process_mode(int value) {
     }
 }
 
+Rml::String format_anti_aliasing(int value) {
+    switch (static_cast<AntiAliasingMode>(value)) {
+    case AntiAliasingMode::Off:
+        return "Off";
+    case AntiAliasingMode::Dlaa:
+        return "DLAA";
+    default:
+        return "";
+    }
+}
+
 Rml::String format_times(int value) { return fmt::format("{}×", value); }
 
 Rml::String format_percent(int value) { return fmt::format("{}%", value); }
@@ -101,7 +112,7 @@ void write_cvar(ConfigVar<T>& var, int value) {
 
 template <auto Var, typename Min, typename Max, typename Def>
 const GraphicsSetting& bind(Min min, Max max, Def def, int step, Rml::String (*label)(int),
-    bool watchSize = false) {
+    bool watchSize = false, bool (*isAvailable)() = nullptr) {
     static const GraphicsSetting desc{
         .min = static_cast<int>(min),
         .max = static_cast<int>(max),
@@ -113,6 +124,7 @@ const GraphicsSetting& bind(Min min, Max max, Def def, int step, Rml::String (*l
         .label = label,
         .cvarName = []() -> const char* { return Var().getName(); },
         .isModified = []() -> bool { return Var().getValue() != Var().getDefaultValue(); },
+        .isAvailable = isAvailable,
     };
     return desc;
 }
@@ -161,6 +173,10 @@ const GraphicsSetting& GraphicsSetting::of(GraphicsOption option) {
         return bind<[]() -> auto& { return getSettings().game.depthOfFieldMode; }>(
             DepthOfFieldMode::Off, DepthOfFieldMode::Dusk, DepthOfFieldMode::Classic, 1,
             format_post_process_mode);
+    case GraphicsOption::AntiAliasing:
+        return bind<[]() -> auto& { return getSettings().game.antiAliasing; }>(
+            AntiAliasingMode::Off, AntiAliasingMode::Dlaa, AntiAliasingMode::Off, 1,
+            format_anti_aliasing, false, &isAntiAliasingAvailable);
     case GraphicsOption::TextureReplacements:
         return bind<[]() -> auto& { return getSettings().game.enableTextureReplacements; }>(
             0, 1, 0, 1, format_bool);
@@ -206,9 +222,17 @@ void SteppedCarousel::refresh() {
 
     update_carousel_arrow_color(mPrevElem, value == mProps.min);
     update_carousel_arrow_color(mNextElem, value == mProps.max);
+
+    if (mProps.disabled) {
+        update_carousel_arrow_color(mPrevElem, true);
+        update_carousel_arrow_color(mNextElem, true);
+    }
 }
 
 bool SteppedCarousel::handle_nav_command(NavCommand cmd) {
+    if (mProps.disabled) {
+        return false;
+    }
     if (cmd == NavCommand::Left) {
         const int value = mProps.getValue ? mProps.getValue() : 0;
         apply(std::clamp(value - mProps.step, mProps.min, mProps.max));
@@ -257,6 +281,7 @@ GraphicsTuner::GraphicsTuner(GraphicsTunerProps props)
                 .getValue = [this] { return mSetting.read(); },
                 .onChange = [this](int value) { mSetting.set(value); },
                 .formatValue = [this](int value) { return mSetting.label(value); },
+                .disabled = !mSetting.available(),
             });
     }
 

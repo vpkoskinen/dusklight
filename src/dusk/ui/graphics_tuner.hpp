@@ -22,6 +22,7 @@ public:
         std::function<int()> getValue;
         std::function<void(int)> onChange;
         std::function<Rml::String(int)> formatValue;
+        bool disabled = false;
     };
 
     SteppedCarousel(Rml::Element* parent, Props props);
@@ -47,6 +48,7 @@ enum class GraphicsOption {
     BloomMode,
     BloomMultiplier,
     DepthOfFieldMode,
+    AntiAliasing,
     TextureReplacements,
 };
 
@@ -61,9 +63,12 @@ struct GraphicsSetting {
     Rml::String (*label)(int) = nullptr;
     const char* (*cvarName)() = nullptr;
     bool (*isModified)() = nullptr;
+    // Optional availability predicate; nullptr means always available.
+    bool (*isAvailable)() = nullptr;
 
     static const GraphicsSetting& of(GraphicsOption option);
 
+    bool available() const { return isAvailable == nullptr || isAvailable(); }
     void set(int value) const { write(std::clamp(value, min, max)); }
     Rml::String text() const { return label(read()); }
 };

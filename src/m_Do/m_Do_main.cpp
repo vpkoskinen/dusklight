@@ -43,6 +43,7 @@
 #include "dusk/config.hpp"
 #include "dusk/data.hpp"
 #include "dusk/discord_presence.hpp"
+#include "dusk/dlss.hpp"
 #include "dusk/dusk.h"
 #include "dusk/game_clock.h"
 #include "dusk/game_combos.h"
@@ -331,6 +332,9 @@ void main01(void) {
         }
 
         aurora_end_frame();
+
+        // Keep the DLAA NGX feature in sync with the render size and setting.
+        dusk::syncAntiAliasing();
 
         FrameMark;
 
@@ -708,7 +712,22 @@ int game_main(int argc, char* argv[]) {
         config.pauseOnFocusLost = dusk::getSettings().game.pauseOnFocusLost;
         config.imGuiInitCallback = &aurora_imgui_init_callback;
         config.allowTextureDumps = false;
+        // Register NGX's required Vulkan extensions before Aurora/Dawn create
+        // the instance and device. No-op unless DLSS support is compiled in and
+        // the NGX runtime is present.
+        dusk::dlss::register_vulkan_extensions();
         auroraInfo = aurora_initialize(argc, argv, &config);
+    }
+
+    // The render device now exists; bring up NGX so DLAA can be created later.
+    if (dusk::dlss::is_supported()) {
+        if (dusk::dlss::initialize()) {
+            DuskLog.info("DLAA: NGX initialized");
+        } else {
+            DuskLog.warn("DLAA: NGX initialization failed");
+        }
+    } else {
+        DuskLog.info("DLAA: unavailable: {}", dusk::dlss::unavailable_reason());
     }
 
     dusk::presentation::update_frame_rate_preference();
@@ -983,6 +1002,10 @@ int game_main(int argc, char* argv[]) {
     dusk::ui::shutdown();
     dusk::texture_replacements::shutdown();
     dusk::config::shutdown();
+    // Tear NGX down before the render device is destroyed: leaving NGX
+    // initialized into driver teardown crashes inside the NVIDIA driver.
+    // No-op when DLSS support was not compiled in or was never initialized.
+    dusk::dlss::shutdown();
     aurora_shutdown();
 
     return 0;

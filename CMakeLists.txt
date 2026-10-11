@@ -93,6 +93,23 @@ option(DUSK_PACKAGE_INSTALL "Install Dusklight with a Linux-native file structur
 option(DUSK_GFX_DEBUG_GROUPS "Report debug groups to the native graphics API" ${DUSK_GFX_DEBUG_GROUPS_DEFAULT})
 option(DUSK_ENABLE_CODE_MODS "Enable code mods" ON)
 option(DUSK_ENABLE_OPUS "Enable loading Opus audio files for mods" OFF)
+option(DUSK_ENABLE_DLSS "Enable NVIDIA DLSS/DLAA (NGX) support" OFF)
+set(DUSK_DLSS_SDK_DIR "" CACHE PATH "Path to the NVIDIA DLSS SDK (contains include/ and lib/Linux_x86_64/)")
+
+if (DUSK_ENABLE_DLSS)
+    if (NOT DUSK_DLSS_SDK_DIR)
+        message(FATAL_ERROR
+                "DUSK_ENABLE_DLSS is ON but DUSK_DLSS_SDK_DIR is empty.\n"
+                "Run tools/fetch_dlss_sdk.sh to download the NVIDIA DLSS SDK, then "
+                "configure with -DDUSK_DLSS_SDK_DIR=<path>.")
+    endif ()
+    if (NOT EXISTS "${DUSK_DLSS_SDK_DIR}/include/nvsdk_ngx.h")
+        message(FATAL_ERROR
+                "DUSK_DLSS_SDK_DIR='${DUSK_DLSS_SDK_DIR}' does not contain include/nvsdk_ngx.h.\n"
+                "Run tools/fetch_dlss_sdk.sh to download the NVIDIA DLSS SDK, then "
+                "configure with -DDUSK_DLSS_SDK_DIR=<path>.")
+    endif ()
+endif ()
 
 
 set(DUSK_HAS_FUNCHOOK OFF)
@@ -288,6 +305,10 @@ if (DUSK_ENABLE_OPUS)
     list(APPEND GAME_COMPILE_DEFS DUSK_OPUS=1)
 endif ()
 
+if (DUSK_ENABLE_DLSS)
+    list(APPEND GAME_COMPILE_DEFS DUSK_ENABLE_DLSS=1)
+endif ()
+
 if (WIN32)
     list(APPEND GAME_LIBS Ws2_32)
 endif ()
@@ -379,6 +400,46 @@ target_compile_definitions(dusklight PRIVATE ${GAME_COMPILE_DEFS})
 target_include_directories(dusklight PRIVATE ${miniz_SOURCE_DIR})
 target_link_libraries(dusklight PRIVATE dusk_internal aurora::main ${GAME_LIBS} ${JSYSTEM_LINK_LIBRARIES})
 target_precompile_headers(dusklight PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_SOURCE_DIR}/include/dusk_pch.hpp>")
+
+if (DUSK_ENABLE_DLSS)
+    target_include_directories(dusk_internal PRIVATE "${DUSK_DLSS_SDK_DIR}/include")
+    target_include_directories(dusklight PRIVATE "${DUSK_DLSS_SDK_DIR}/include")
+
+    # The NGX entry points are provided by the SDK's forwarding loader stub
+    # (`libnvsdk_ngx.a`), which dlopens the NGX runtime on demand and forwards
+    # every call to it. The runtime driver library itself does not export
+    # `NVSDK_NGX_VULKAN_Init_with_ProjectID` (only `..._Init_ProjectID`), so the
+    # stub is required. Link it for the DUSK_ENABLE_DLSS targets.
+    # Default (OFF) builds are completely unaffected.
+    set(_dusk_ngx_loader_stub "${DUSK_DLSS_SDK_DIR}/lib/Linux_x86_64/libnvsdk_ngx.a")
+    if (EXISTS "${_dusk_ngx_loader_stub}")
+        target_link_libraries(dusk_internal PRIVATE "${_dusk_ngx_loader_stub}" ${CMAKE_DL_LIBS})
+        target_link_libraries(dusklight PRIVATE "${_dusk_ngx_loader_stub}" ${CMAKE_DL_LIBS})
+        message(STATUS "DUSK_ENABLE_DLSS: linking NGX loader stub ${_dusk_ngx_loader_stub}")
+    else ()
+        message(WARNING "DUSK_ENABLE_DLSS: NGX loader stub '${_dusk_ngx_loader_stub}' not found; "
+                        "NVSDK_NGX_VULKAN_Init_with_ProjectID will be missing at link time and DLAA "
+                        "will be unavailable.")
+    endif ()
+
+    # `src/dusk/dlss_dawn.cpp` includes the native (patched) Dawn Vulkan backend
+    # header, so make the Dawn include directory visible to the game targets.
+    # Only needed when DLSS is enabled; default builds are unaffected.
+    set(_dusk_dawn_include_dirs "")
+    if (TARGET dawn::webgpu_dawn)
+        get_target_property(_dusk_dawn_include_dirs dawn::webgpu_dawn INTERFACE_INCLUDE_DIRECTORIES)
+    endif ()
+    if (NOT _dusk_dawn_include_dirs AND TARGET dawn::dawncpp_headers)
+        get_target_property(_dusk_dawn_include_dirs dawn::dawncpp_headers INTERFACE_INCLUDE_DIRECTORIES)
+    endif ()
+    if (_dusk_dawn_include_dirs)
+        target_include_directories(dusk_internal PRIVATE ${_dusk_dawn_include_dirs})
+        target_include_directories(dusklight PRIVATE ${_dusk_dawn_include_dirs})
+    else ()
+        message(WARNING "DUSK_ENABLE_DLSS: could not determine the Dawn include directory; "
+                        "src/dusk/dlss_dawn.cpp may fail to compile.")
+    endif ()
+endif ()
 
 if (DUSK_ENABLE_CODE_MODS)
     include(cmake/SymbolManifest.cmake)
