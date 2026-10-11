@@ -92,7 +92,9 @@ static void* aurora_dlss_dawn_vk_get_device_proc_addr(void) {
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -1046,7 +1048,9 @@ bool ensure_resources(uint32_t width, uint32_t height, wgpu::TextureFormat color
 aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const wgpu::Texture& sceneColorTexture,
                                                        const wgpu::TextureView& sceneColorView,
                                                        const wgpu::Texture& sceneDepthTexture,
-                                                       const wgpu::TextureView& sceneDepthView, uint32_t width,
+                                                       const wgpu::TextureView& sceneDepthView,
+                                                       const wgpu::Texture& sceneMvTexture,
+                                                       const wgpu::TextureView& sceneMvView, uint32_t width,
                                                        uint32_t height) {
     std::lock_guard<std::mutex> lock(g_dlaaMutex);
     if (g_feature == nullptr || g_params == nullptr || width == 0 || height == 0) {
@@ -1079,12 +1083,30 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
         return {};
     }
 
-    // --- Camera-reprojection motion vectors (the §7.1 MVP). ---
+    // --- Motion vectors. ---
     //
-    // The scene color/depth are GPU-complete (deviceWaitIdle above). Build the
-    // reprojection constant C = M_eff_prev * inverse(M_eff_curr) from the
-    // current and previous effective world->clip matrices, render motion
-    // vectors into the RG16F target, and sync before NGX consumes them.
+    // Preferred source: the per-object motion-vector attachment produced by
+    // Aurora's GX shader while DLAA is active. It already encodes both camera
+    // and object motion in render pixels (previous - current, +y down).
+    // Fallback: the camera-only reprojection pass below (static geometry only).
+    const bool msaa = sceneDepthTexture.GetSampleCount() > 1;
+
+    bool sceneMotionVectors = !msaa && sceneMvTexture != nullptr && sceneMvView != nullptr;
+    VkImage sceneMvImage = VK_NULL_HANDLE;
+    VkImageView sceneMvImageView = VK_NULL_HANDLE;
+    VkFormat sceneMvVkFormat = VK_FORMAT_UNDEFINED;
+    if (sceneMotionVectors) {
+        sceneMvImage = dawn::native::vulkan::GetVkImage(sceneMvTexture.Get());
+        sceneMvImageView = dawn::native::vulkan::GetVkImageView(sceneMvView.Get());
+        sceneMvVkFormat = to_vk_format(sceneMvTexture.GetFormat());
+        if (sceneMvImage == VK_NULL_HANDLE || sceneMvImageView == VK_NULL_HANDLE ||
+            sceneMvVkFormat == VK_FORMAT_UNDEFINED) {
+            sceneMotionVectors = false;
+        }
+    }
+
+    // Camera cut / first-frame detection. Used both to decide the NGX reset and
+    // to drive the fallback reprojection pass.
     const view_class* view = dComIfGd_getView();
     const Mtx44* projViewMtx = (view != nullptr) ? &view->projViewMtx : nullptr;
     Mat4 effCur;
@@ -1094,7 +1116,6 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
         mat4_identity(effCur);
     }
 
-    const bool msaa = sceneDepthTexture.GetSampleCount() > 1;
     bool reprojectValid = false;
     Mat4 C;
     if (!msaa && projViewMtx != nullptr && g_mv.hasPrev) {
@@ -1113,7 +1134,11 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
     }
 
     bool mvSubmitted = false;
-    if (!msaa) {
+    if (sceneMotionVectors) {
+        // The scene pass already wrote the motion-vector attachment (it lands on
+        // Dawn's queue). The deviceWaitIdle below makes it visible to NGX.
+        mvSubmitted = true;
+    } else if (!msaa) {
         mvSubmitted = run_mv_pass(sceneDepthView, C, width, height);
         // The reprojection writes land on Dawn's queue; make them visible to the
         // NGX evaluate on the reserved app queue.
@@ -1141,8 +1166,12 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
                                                                             width, height, false);
     NVSDK_NGX_Resource_VK depthRes =
         NVSDK_NGX_Create_ImageView_Resource_VK(depthView, depthImage, depthRange, depthVk, width, height, false);
-    NVSDK_NGX_Resource_VK mvRes = NVSDK_NGX_Create_ImageView_Resource_VK(
-        g_resources.mvImageView, g_resources.mvImage, colorRange, g_resources.mvVkFormat, width, height, false);
+    NVSDK_NGX_Resource_VK mvRes =
+        sceneMotionVectors
+            ? NVSDK_NGX_Create_ImageView_Resource_VK(sceneMvImageView, sceneMvImage, colorRange, sceneMvVkFormat, width,
+                                                     height, false)
+            : NVSDK_NGX_Create_ImageView_Resource_VK(g_resources.mvImageView, g_resources.mvImage, colorRange,
+                                                     g_resources.mvVkFormat, width, height, false);
     NVSDK_NGX_Resource_VK outRes = NVSDK_NGX_Create_ImageView_Resource_VK(
         g_resources.outputImageView, g_resources.outputImage, colorRange, g_resources.outputVkFormat, width, height,
         true);
@@ -1207,6 +1236,9 @@ void release_feature_locked() {
     }
     g_feature = nullptr;
     release_resources();
+    // Stop producing per-object motion vectors; Aurora reverts to the normal
+    // single-color scene target on the next frame.
+    aurora::gfx::set_motion_vector_output(false);
     g_jitterX.store(0.f, std::memory_order_relaxed);
     g_jitterY.store(0.f, std::memory_order_relaxed);
     g_jitterFrame = 0;
@@ -1376,6 +1408,12 @@ bool create(uint32_t renderWidth, uint32_t renderHeight, Quality quality) {
 
     g_feature = handle;
     g_reset = true;
+    // Enable per-object motion vectors for subsequent frames. Aurora adds the
+    // RG16F scene attachment and the GX shader starts emitting MVs; the hook
+    // prefers them over the camera-reprojection fallback.
+    if (!aurora::gfx::set_motion_vector_output(true)) {
+        DuskLog.warn("dlss: could not enable per-object motion vectors; using camera reprojection");
+    }
     DuskLog.info("DLAA: feature created {}x{}", renderWidth, renderHeight);
     return true;
 }
