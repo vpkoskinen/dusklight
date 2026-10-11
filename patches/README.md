@@ -12,7 +12,12 @@ DLAA support (`DUSK_ENABLE_DLSS`). Everything else lives in the normal
 | File | Applies to | What it adds |
 |---|---|---|
 | `dawn-ngx-interop.patch` | `encounter/dawn` @ `1155e0ed531126f33a1279afa029349651ca1c93` | Exported Vulkan handle getters (`GetVkDevice`/`GetVkPhysicalDevice`/`GetQueueFamilyIndex`/`GetDeviceProcAddr`/`GetAppVkQueue`), texture getters (`GetVkImage`/`GetVkImageView`), app-provided extra instance/device extensions appended at `vkCreateInstance`/`vkCreateDevice`, and an optional second app-reserved `VkQueue`. Default behavior is unchanged when nothing is requested. |
-| `aurora-dlaa-hook.patch` | `encounter/aurora` @ `3227d76c60e1e782ca576610bce61c9e7744d8be` | `aurora::gfx::set_scene_post_process()` — a present-path hook that finishes+submits the scene, then blits a hook-returned target to the swapchain; and `aurora::gfx::set_projection_jitter()` — perspective-only sub-pixel projection jitter injected at the GX uniform choke point. |
+| `aurora-dlaa-hook.patch` | `encounter/aurora` @ `3227d76c60e1e782ca576610bce61c9e7744d8be` | `aurora::gfx::set_scene_post_process()` — a present-path hook that finishes+submits the scene, then blits a hook-returned target to the swapchain; `aurora::gfx::set_projection_jitter()` — perspective-only sub-pixel projection jitter injected at the GX uniform choke point; and an optional per-object motion-vector scene attachment (RG16F) exposed to the hook. |
+
+> The per-object motion-vector path also requires the parent-repo change
+> `libs/JSystem/src/J3DGraphBase/J3DGD.cpp` (routes `J3DFifoLoadPosMtxImm`
+> through `GXLoadPosMtxImm` so the source pointer is visible); it is already in
+> this branch's commits.
 
 ## 1. Dawn
 
@@ -46,7 +51,7 @@ the default Dusklight preset uses GCC — both are libstdc++, so ABI-compatible)
 ## 2. Aurora
 
 This branch has Aurora as a **git submodule** with a **local-only** commit
-(`eb2726a`) that is not on any remote (we must not push to `encounter/aurora`).
+(`592d908`) that is not on any remote (we must not push to `encounter/aurora`).
 Two ways to reproduce:
 
 * Point the submodule at the local commit (already the case on this branch), or
