@@ -86,12 +86,18 @@ static void* aurora_dlss_dawn_vk_get_device_proc_addr(void) {
 
 #include <aurora/gfx.hpp>
 
+#include "d/d_com_inf_game.h"
 #include "dusk/data.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #endif  // DUSK_ENABLE_DLSS
 
@@ -561,7 +567,6 @@ struct DlaaResources {
     VkImage mvImage = VK_NULL_HANDLE;
     VkImageView mvImageView = VK_NULL_HANDLE;
     VkFormat mvVkFormat = VK_FORMAT_UNDEFINED;
-    bool mvCleared = false;
 
     bool matches(uint32_t w, uint32_t h, wgpu::TextureFormat format) const {
         return outputImageView != VK_NULL_HANDLE && mvImageView != VK_NULL_HANDLE && width == w && height == h &&
@@ -582,6 +587,347 @@ std::atomic<float> g_jitterY{0.f};
 uint64_t g_jitterFrame = 0;
 bool g_evalLogged = false;
 uint32_t g_evalFailCount = 0;
+
+// ===========================================================================
+// Camera-reprojection motion vectors (the §7.1 MVP).
+//
+// DLSS/DLAA motion vectors describe where each pixel moved from the previous
+// frame to the current one, in render-resolution pixels, with the DLSS
+// convention `motionVector = previousPixel - currentPixel` (so
+// `currentPixel + motionVector` is the location the surface occupied in the
+// previous frame; this is what the DLSS Programming Guide specifies). +y points
+// down, matching the render target / UV orientation.
+//
+// Camera-only reprojection: for a static surface the world position is the
+// same in both frames, so the previous clip position is
+//     clipPrev = M_eff_prev * inverse(M_eff_curr) * clipCur
+// where M_eff is the effective (reversed-Z) world->clip matrix. That constant
+// `C = M_eff_prev * inverse(M_eff_curr)` is computed here on the CPU and fed to
+// a full-screen pass that reconstructs clipCur from the depth buffer.
+//
+// This ignores object motion (characters/particles will ghost); DLSS mitigates
+// that with its depth-based clamping. Full per-object MVs are a follow-up.
+// ===========================================================================
+
+// 4x4 row-major matrix in the game/Aurora convention (`clip = M * world`,
+// vectors as columns), matching `Mtx44`.
+using Mat4 = float[4][4];
+
+void mat4_identity(Mat4 out) {
+    std::memset(out, 0, sizeof(Mat4));
+    for (int i = 0; i < 4; ++i) {
+        out[i][i] = 1.0f;
+    }
+}
+
+// `projView = proj * view`. Aurora's GX shader adjusts the projection for the
+// depth range right before uploading it: reversed-Z negates the projection's
+// row 2, forward-Z adds row 3 to row 2 (`extern/aurora/lib/gx/shader_info.cpp`,
+// the single projection upload choke point). Because projView = proj * view,
+// that is equivalent to applying the same row operation to `projView`'s row 2,
+// which is what this reproduces so the matrix matches the stored depth.
+void mat4_effective_projview(const Mtx44 projView, Mat4 out) {
+    std::memcpy(out, projView, sizeof(Mat4));
+    if (aurora::gfx::uses_reversed_z()) {
+        for (int c = 0; c < 4; ++c) {
+            out[2][c] = -out[2][c];
+        }
+    } else {
+        for (int c = 0; c < 4; ++c) {
+            out[2][c] = out[2][c] + out[3][c];
+        }
+    }
+}
+
+void mat4_mul(const Mat4 a, const Mat4 b, Mat4 out) {
+    Mat4 tmp;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            tmp[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c] + a[r][3] * b[3][c];
+        }
+    }
+    std::memcpy(out, tmp, sizeof(Mat4));
+}
+
+// Gauss-Jordan inverse with partial pivoting. Returns false when singular.
+bool mat4_inverse(const Mat4 m, Mat4 out) {
+    float a[4][8];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            a[r][c] = m[r][c];
+            a[r][c + 4] = (r == c) ? 1.0f : 0.0f;
+        }
+    }
+    for (int col = 0; col < 4; ++col) {
+        int pivot = col;
+        float best = std::fabs(a[col][col]);
+        for (int r = col + 1; r < 4; ++r) {
+            const float v = std::fabs(a[r][col]);
+            if (v > best) {
+                best = v;
+                pivot = r;
+            }
+        }
+        if (best < 1e-20f) {
+            return false;
+        }
+        if (pivot != col) {
+            for (int c = 0; c < 8; ++c) {
+                std::swap(a[pivot][c], a[col][c]);
+            }
+        }
+        const float invPivot = 1.0f / a[col][col];
+        for (int c = 0; c < 8; ++c) {
+            a[col][c] *= invPivot;
+        }
+        for (int r = 0; r < 4; ++r) {
+            if (r == col) {
+                continue;
+            }
+            const float f = a[r][col];
+            if (f == 0.0f) {
+                continue;
+            }
+            for (int c = 0; c < 8; ++c) {
+                a[r][c] -= f * a[col][c];
+            }
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            out[r][c] = a[r][c + 4];
+        }
+    }
+    return true;
+}
+
+// Largest absolute element distance of `m` from the identity. Used to detect
+// camera cuts: a normal per-frame reprojection stays near the identity, while a
+// cut/teleport produces a wildly different matrix. Returns a huge value when
+// non-finite so a degenerate matrix is treated as a cut.
+float mat4_identity_delta(const Mat4 m) {
+    float maxDelta = 0.0f;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            const float target = (r == c) ? 1.0f : 0.0f;
+            const float d = std::fabs(m[r][c] - target);
+            if (!std::isfinite(d)) {
+                return 1e30f;
+            }
+            maxDelta = std::max(maxDelta, d);
+        }
+    }
+    return maxDelta;
+}
+
+// A reprojection whose constant is further from identity than this is treated
+// as a camera cut (observed callbacks for real per-frame motion stay < ~1).
+constexpr float kMvCutThreshold = 3.0f;
+
+// Uniform for the motion-vector pass: the four rows of C plus the render size.
+struct MvUniforms {
+    float c[4][4];
+    float resolution[2];
+    float pad[2];
+};
+static_assert(sizeof(MvUniforms) == 80);
+
+// Full-screen pass. `depth_tex` is the scene depth (`rg16float` is not a WebGPU
+// storage format, so this is a fragment pass into the RG16F MV target rather
+// than a compute/storage pass). Motion vectors are emitted in render pixels,
+// previous - current, +y down.
+constexpr std::string_view kMvShader = R"(
+struct MvUniforms {
+    c0: vec4f,
+    c1: vec4f,
+    c2: vec4f,
+    c3: vec4f,
+    resolution: vec2f,
+    pad: vec2f,
+};
+
+@group(0) @binding(0) var depth_tex: texture_depth_2d;
+@group(0) @binding(1) var<uniform> u: MvUniforms;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    var p = array<vec2f, 3>(vec2f(-1.0, 1.0), vec2f(-1.0, -3.0), vec2f(3.0, 1.0));
+    return vec4f(p[vi], 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec2f {
+    let pixel = vec2i(frag.xy);
+    let depth = textureLoad(depth_tex, pixel, 0);
+    let uc = frag.xy / u.resolution;
+    // NDC y points up while the framebuffer/depth texture y points down.
+    let ndc_cur = vec2f(uc.x * 2.0 - 1.0, 1.0 - uc.y * 2.0);
+    let clip_cur = vec4f(ndc_cur.x, ndc_cur.y, depth, 1.0);
+    let clip_prev = vec4f(dot(u.c0, clip_cur), dot(u.c1, clip_cur),
+                          dot(u.c2, clip_cur), dot(u.c3, clip_cur));
+    let ndc_prev = clip_prev.xy / clip_prev.w;
+    // DLSS convention: previous - current, in render pixels, +y down.
+    let mv = vec2f(ndc_prev.x - ndc_cur.x, ndc_cur.y - ndc_prev.y) * u.resolution * 0.5;
+    return mv;
+}
+)";
+
+struct MvPassState {
+    wgpu::BindGroupLayout layout;
+    wgpu::RenderPipeline pipeline;
+    wgpu::Buffer uniform;
+    float prevEff[4][4]{};
+    bool hasPrev = false;
+};
+
+MvPassState g_mv;
+
+// Lazily creates the (device-lifetime) motion-vector pipeline/uniform. The
+// render target/view are per-size and passed in per frame.
+bool ensure_mv_pipeline() {
+    if (g_mv.pipeline) {
+        return true;
+    }
+    const wgpu::Device device = aurora::gfx::device();
+    if (!device) {
+        return false;
+    }
+
+    const std::array layoutEntries{
+        wgpu::BindGroupLayoutEntry{
+            .binding = 0,
+            .visibility = wgpu::ShaderStage::Fragment,
+            .texture =
+                wgpu::TextureBindingLayout{
+                    .sampleType = wgpu::TextureSampleType::Depth,
+                    .viewDimension = wgpu::TextureViewDimension::e2D,
+                },
+        },
+        wgpu::BindGroupLayoutEntry{
+            .binding = 1,
+            .visibility = wgpu::ShaderStage::Fragment,
+            .buffer =
+                wgpu::BufferBindingLayout{
+                    .type = wgpu::BufferBindingType::Uniform,
+                },
+        },
+    };
+    const wgpu::BindGroupLayoutDescriptor layoutDesc{
+        .label = "DLAA motion-vector bind group layout",
+        .entryCount = layoutEntries.size(),
+        .entries = layoutEntries.data(),
+    };
+    g_mv.layout = device.CreateBindGroupLayout(&layoutDesc);
+
+    const std::string source{kMvShader};
+    const wgpu::ShaderSourceWGSL wgslSource{wgpu::ShaderSourceWGSL::Init{.code = source.c_str()}};
+    const wgpu::ShaderModuleDescriptor moduleDesc{
+        .nextInChain = &wgslSource,
+        .label = "DLAA motion-vector shader",
+    };
+    const auto module = device.CreateShaderModule(&moduleDesc);
+
+    const std::array colorTargets{wgpu::ColorTargetState{
+        .format = wgpu::TextureFormat::RG16Float,
+    }};
+    const wgpu::FragmentState fragmentState{
+        .module = module,
+        .entryPoint = "fs_main",
+        .targetCount = colorTargets.size(),
+        .targets = colorTargets.data(),
+    };
+    const wgpu::PipelineLayoutDescriptor pipelineLayoutDesc{
+        .bindGroupLayoutCount = 1,
+        .bindGroupLayouts = &g_mv.layout,
+    };
+    const auto pipelineLayout = device.CreatePipelineLayout(&pipelineLayoutDesc);
+    const wgpu::RenderPipelineDescriptor pipelineDesc{
+        .label = "DLAA motion-vector pipeline",
+        .layout = pipelineLayout,
+        .vertex =
+            wgpu::VertexState{
+                .module = module,
+                .entryPoint = "vs_main",
+            },
+        .primitive =
+            wgpu::PrimitiveState{
+                .topology = wgpu::PrimitiveTopology::TriangleList,
+            },
+        .fragment = &fragmentState,
+    };
+    g_mv.pipeline = device.CreateRenderPipeline(&pipelineDesc);
+
+    const wgpu::BufferDescriptor uniformDesc{
+        .label = "DLAA motion-vector uniforms",
+        .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
+        .size = sizeof(MvUniforms),
+    };
+    g_mv.uniform = device.CreateBuffer(&uniformDesc);
+    return g_mv.pipeline && g_mv.uniform;
+}
+
+// Records and submits the reprojection pass. `C` is `M_eff_prev * inverse(M_eff_curr)`
+// (identity on a reset frame, which yields zero MVs). Returns true when the pass
+// was submitted.
+bool run_mv_pass(const wgpu::TextureView& depthView, const Mat4 C, uint32_t width, uint32_t height) {
+    if (!ensure_mv_pipeline()) {
+        return false;
+    }
+    const wgpu::Device device = aurora::gfx::device();
+    const wgpu::Queue queue = aurora::gfx::queue();
+    if (!device || !queue) {
+        return false;
+    }
+
+    MvUniforms uniforms{};
+    std::memcpy(uniforms.c, C, sizeof(uniforms.c));
+    uniforms.resolution[0] = static_cast<float>(width);
+    uniforms.resolution[1] = static_cast<float>(height);
+    queue.WriteBuffer(g_mv.uniform, 0, &uniforms, sizeof(uniforms));
+
+    const std::array bindEntries{
+        wgpu::BindGroupEntry{
+            .binding = 0,
+            .textureView = depthView,
+        },
+        wgpu::BindGroupEntry{
+            .binding = 1,
+            .buffer = g_mv.uniform,
+            .size = sizeof(MvUniforms),
+        },
+    };
+    const wgpu::BindGroupDescriptor bindGroupDesc{
+        .label = "DLAA motion-vector bind group",
+        .layout = g_mv.layout,
+        .entryCount = bindEntries.size(),
+        .entries = bindEntries.data(),
+    };
+    const auto bindGroup = device.CreateBindGroup(&bindGroupDesc);
+
+    const std::array colorAttachments{
+        wgpu::RenderPassColorAttachment{
+            .view = g_resources.mvView,
+            .loadOp = wgpu::LoadOp::Clear,
+            .storeOp = wgpu::StoreOp::Store,
+            .clearValue = {0.f, 0.f, 0.f, 0.f},
+        },
+    };
+    const wgpu::RenderPassDescriptor renderPassDesc{
+        .label = "DLAA motion-vector pass",
+        .colorAttachmentCount = colorAttachments.size(),
+        .colorAttachments = colorAttachments.data(),
+    };
+    const auto encoder = device.CreateCommandEncoder();
+    const auto pass = encoder.BeginRenderPass(&renderPassDesc);
+    pass.SetPipeline(g_mv.pipeline);
+    pass.SetBindGroup(0, bindGroup);
+    pass.Draw(3);
+    pass.End();
+
+    const auto cmd = encoder.Finish();
+    queue.Submit(1, &cmd);
+    return true;
+}
 
 VkImageView create_color_image_view(VkImage image, VkFormat format) {
     if (image == VK_NULL_HANDLE || format == VK_FORMAT_UNDEFINED || g_cmd.createImageView == nullptr) {
@@ -614,6 +960,9 @@ void release_resources() {
         }
     }
     g_resources = {};
+    // A new MV target invalidates the reprojection history (no previous frame).
+    g_mv.hasPrev = false;
+    std::memset(g_mv.prevEff, 0, sizeof(g_mv.prevEff));
 }
 
 bool ensure_resources(uint32_t width, uint32_t height, wgpu::TextureFormat colorFormat) {
@@ -653,12 +1002,14 @@ bool ensure_resources(uint32_t width, uint32_t height, wgpu::TextureFormat color
                      wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::StorageBinding |
                          wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst,
                      width, height);
-    // Motion vectors: RG16Float. NGX only reads them (zeroed = no reprojection
-    // for this MVP), so no storage usage is required; RG16Float is not a WebGPU
-    // storage format anyway.
-    g_resources.mvTexture = make_texture(
-        "DLAA motion vectors", wgpu::TextureFormat::RG16Float,
-        wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst, width, height);
+    // Motion vectors: RG16Float. NGX reads them; the camera-reprojection pass
+    // renders into them (RenderAttachment). RG16Float is not a WebGPU storage
+    // format, so the pass is a fragment pass rather than compute/storage.
+    g_resources.mvTexture =
+        make_texture("DLAA motion vectors", wgpu::TextureFormat::RG16Float,
+                     wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding |
+                         wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst,
+                     width, height);
 
     if (!g_resources.outputTexture || !g_resources.mvTexture) {
         DuskLog.warn("dlss: failed to create DLAA output/motion-vector textures");
@@ -674,7 +1025,6 @@ bool ensure_resources(uint32_t width, uint32_t height, wgpu::TextureFormat color
     g_resources.mvVkFormat = VK_FORMAT_R16G16_SFLOAT;
     g_resources.outputImageView = create_color_image_view(g_resources.outputImage, g_resources.outputVkFormat);
     g_resources.mvImageView = create_color_image_view(g_resources.mvImage, g_resources.mvVkFormat);
-    g_resources.mvCleared = false;
     g_resources.width = width;
     g_resources.height = height;
     g_resources.colorFormat = colorFormat;
@@ -729,6 +1079,55 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
         return {};
     }
 
+    // --- Camera-reprojection motion vectors (the §7.1 MVP). ---
+    //
+    // The scene color/depth are GPU-complete (deviceWaitIdle above). Build the
+    // reprojection constant C = M_eff_prev * inverse(M_eff_curr) from the
+    // current and previous effective world->clip matrices, render motion
+    // vectors into the RG16F target, and sync before NGX consumes them.
+    const view_class* view = dComIfGd_getView();
+    const Mtx44* projViewMtx = (view != nullptr) ? &view->projViewMtx : nullptr;
+    Mat4 effCur;
+    if (projViewMtx != nullptr) {
+        mat4_effective_projview(*projViewMtx, effCur);
+    } else {
+        mat4_identity(effCur);
+    }
+
+    const bool msaa = sceneDepthTexture.GetSampleCount() > 1;
+    bool reprojectValid = false;
+    Mat4 C;
+    if (!msaa && projViewMtx != nullptr && g_mv.hasPrev) {
+        Mat4 invCur;
+        if (mat4_inverse(effCur, invCur)) {
+            mat4_mul(g_mv.prevEff, invCur, C);
+            // A wildly different matrix is a camera cut/teleport, not real
+            // motion; fall back to a reset instead of reprojecting garbage.
+            reprojectValid = mat4_identity_delta(C) < kMvCutThreshold;
+        }
+    }
+    if (!reprojectValid) {
+        // First frame / camera cut / no usable history: identity yields zero
+        // motion vectors, paired with InReset=1 so NGX discards its history.
+        mat4_identity(C);
+    }
+
+    bool mvSubmitted = false;
+    if (!msaa) {
+        mvSubmitted = run_mv_pass(sceneDepthView, C, width, height);
+        // The reprojection writes land on Dawn's queue; make them visible to the
+        // NGX evaluate on the reserved app queue.
+        g_cmd.deviceWaitIdle(g_cmd.device);
+    }
+    if (projViewMtx != nullptr) {
+        std::memcpy(g_mv.prevEff, effCur, sizeof(effCur));
+        g_mv.hasPrev = !msaa;
+    } else {
+        g_mv.hasPrev = false;
+    }
+
+    const bool reprojectionActive = reprojectValid && mvSubmitted;
+
     VkImageSubresourceRange colorRange{};
     colorRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     colorRange.levelCount = 1;
@@ -748,7 +1147,7 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
         g_resources.outputImageView, g_resources.outputImage, colorRange, g_resources.outputVkFormat, width, height,
         true);
 
-    const bool reset = g_reset;
+    const bool reset = g_reset || !reprojectionActive;
     const float jx = g_jitterX.load(std::memory_order_relaxed);
     const float jy = g_jitterY.load(std::memory_order_relaxed);
 
@@ -771,14 +1170,6 @@ aurora::gfx::PostProcessTarget scene_post_process_hook(void* /*userdata*/, const
 
     if (!g_cmd.begin()) {
         return {};
-    }
-
-    // Zero the motion vectors once after (re)creation. Zero MVs mean this MVP
-    // performs no history reprojection.
-    if (!g_resources.mvCleared && g_cmd.cmdClearColorImage != nullptr) {
-        VkClearColorValue clear{};
-        g_cmd.cmdClearColorImage(g_cmd.cmdBuffer, g_resources.mvImage, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &colorRange);
-        g_resources.mvCleared = true;
     }
 
     const NVSDK_NGX_Result evalResult = g_ngx.evaluateFeature(g_cmd.cmdBuffer, g_feature, g_params, nullptr);
@@ -914,6 +1305,10 @@ void shutdown() {
         }
         release_feature_locked();
         release_resources();
+        // Drop the device-owned motion-vector pipeline objects.
+        g_mv.pipeline = {};
+        g_mv.layout = {};
+        g_mv.uniform = {};
     }
     g_cmd.shutdown();
     if (g_params != nullptr && g_ngx.destroyParameters != nullptr) {
@@ -951,9 +1346,12 @@ bool create(uint32_t renderWidth, uint32_t renderHeight, Quality quality) {
     g_params->Set(NVSDK_NGX_Parameter_OutWidth, renderWidth);
     g_params->Set(NVSDK_NGX_Parameter_OutHeight, renderHeight);
     g_params->Set(NVSDK_NGX_Parameter_PerfQualityValue, static_cast<int>(NVSDK_NGX_PerfQuality_Value_DLAA));
-    // Aurora renders with reversed-Z depth.
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,
-                  static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_DepthInverted));
+    // Aurora renders with reversed-Z depth. Motion vectors are produced at
+    // render resolution by a camera-reprojection pass (MVLowRes); they are not
+    // jittered because that pass uses the unjittered camera matrix.
+    const int createFlags = static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_DepthInverted |
+                                             NVSDK_NGX_DLSS_Feature_Flags_MVLowRes);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, createFlags);
     g_params->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 0);
 
     // NGX requires an *open and recording* command buffer here; passing
