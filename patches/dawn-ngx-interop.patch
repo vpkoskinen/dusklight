@@ -1,0 +1,285 @@
+--- a/include/dawn/native/VulkanBackend.h
++++ b/include/dawn/native/VulkanBackend.h
+@@ -31,6 +31,7 @@
+ #include <vulkan/vulkan.h>
+ 
+ #include <array>
++#include <string>
+ #include <vector>
+ 
+ #include "dawn/native/DawnNative.h"
+@@ -39,8 +40,53 @@
+ 
+ DAWN_NATIVE_EXPORT VkInstance GetInstance(WGPUDevice device);
+ 
++// Returns the raw VkDevice owned by |device|.
++DAWN_NATIVE_EXPORT VkDevice GetVkDevice(WGPUDevice device);
++
++// Returns the raw VkPhysicalDevice backing |device|.
++DAWN_NATIVE_EXPORT VkPhysicalDevice GetVkPhysicalDevice(WGPUDevice device);
++
++// Returns the raw VkImage backing |texture|.
++DAWN_NATIVE_EXPORT VkImage GetVkImage(WGPUTexture texture);
++
++// Returns the raw VkImageView backing |view|.
++DAWN_NATIVE_EXPORT VkImageView GetVkImageView(WGPUTextureView view);
++
++// Returns the queue family index that Dawn uses for its main (graphics/compute/transfer) queue.
++DAWN_NATIVE_EXPORT uint32_t GetQueueFamilyIndex(WGPUDevice device);
++
++// Returns the Vulkan device-level proc address for |pName| on |device|.
++DAWN_NATIVE_EXPORT PFN_vkVoidFunction GetDeviceProcAddr(WGPUDevice device, const char* pName);
++
++// Returns the application-reserved secondary VkQueue (family index GetQueueFamilyIndex(),
++// queue index 1). This is only valid if RequestAppVkQueue(true) was called before the device
++// was created and Dawn does not submit work to it.
++DAWN_NATIVE_EXPORT VkQueue GetAppVkQueue(WGPUDevice device);
++
+ DAWN_NATIVE_EXPORT PFN_vkVoidFunction GetInstanceProcAddr(WGPUDevice device, const char* pName);
+ 
++// Requests that the additional instance extensions named in |names| (|count| entries) be appended
++// to vkCreateInstance. Missing/unadvertised extensions are ignored, so this can never make
++// instance creation fail. Must be called before the instance is created. By default nothing is
++// requested and Dawn's behavior is unchanged.
++DAWN_NATIVE_EXPORT void RequestAdditionalInstanceExtensions(const char* const* names,
++                                                            uint32_t count);
++
++// Requests that the additional device extensions named in |names| (|count| entries) be appended to
++// vkCreateDevice. Must be called before the device is created. By default nothing is requested and
++// Dawn's behavior is unchanged.
++DAWN_NATIVE_EXPORT void RequestAdditionalDeviceExtensions(const char* const* names, uint32_t count);
++
++// Requests that Dawn create, but never submit to, a second VkQueue in its main queue family. The
++// queue can then be retrieved with GetAppVkQueue(). Must be called before the device is created.
++// By default no second queue is created.
++DAWN_NATIVE_EXPORT void RequestAppVkQueue(bool enable);
++
++// Internal accessors used by the Vulkan backend during instance/device creation.
++const std::vector<std::string>& GetRequestedInstanceExtensions();
++const std::vector<std::string>& GetRequestedDeviceExtensions();
++bool IsAppVkQueueRequested();
++
+ enum class NeedsDedicatedAllocation {
+     Yes,
+     No,
+--- a/src/dawn/native/vulkan/VulkanBackend.cpp
++++ b/src/dawn/native/vulkan/VulkanBackend.cpp
+@@ -28,7 +28,11 @@
+ // VulkanBackend.cpp: contains the definition of symbols exported by VulkanBackend.h so that they
+ // can be compiled twice: once export (shared library), once not exported (static library)
+ 
++#include <algorithm>
++#include <mutex>
++#include <string>
+ #include <utility>
++#include <vector>
+ 
+ // Include vulkan_platform.h before VulkanBackend.h includes vulkan.h so that we use our version
+ // of the non-dispatchable handles.
+@@ -37,10 +41,55 @@
+ // Must be after vulkan_platform
+ #include "dawn/native/VulkanBackend.h"
+ #include "src/dawn/native/vulkan/DeviceVk.h"
++#include "src/dawn/native/vulkan/PhysicalDeviceVk.h"
+ #include "src/dawn/native/vulkan/TextureVk.h"
+ 
+ namespace dawn::native::vulkan {
+ 
++namespace {
++
++// Registry of extensions and options requested by the application. Requests are expected to be
++// made before the instance/device is created, and are read (not mutated) during creation.
++std::mutex& GetRequestRegistryMutex() {
++    static std::mutex mutex;
++    return mutex;
++}
++
++std::vector<std::string>& GetInstanceExtensionRegistry() {
++    static std::vector<std::string> extensions;
++    return extensions;
++}
++
++std::vector<std::string>& GetDeviceExtensionRegistry() {
++    static std::vector<std::string> extensions;
++    return extensions;
++}
++
++bool& GetAppVkQueueRegistry() {
++    static bool requested = false;
++    return requested;
++}
++
++void AddExtensionNames(std::vector<std::string>& registry,
++                       const char* const* names,
++                       uint32_t count) {
++    if (names == nullptr || count == 0) {
++        return;
++    }
++    std::lock_guard<std::mutex> lock(GetRequestRegistryMutex());
++    for (uint32_t i = 0; i < count; ++i) {
++        if (names[i] == nullptr || names[i][0] == '\0') {
++            continue;
++        }
++        std::string name(names[i]);
++        if (std::find(registry.begin(), registry.end(), name) == registry.end()) {
++            registry.push_back(std::move(name));
++        }
++    }
++}
++
++}  // anonymous namespace
++
+ VkInstance GetInstance(WGPUDevice device) {
+     Device* backendDevice = ToBackend(FromAPI(device));
+     return backendDevice->GetVkInstance();
+@@ -51,6 +100,64 @@
+     return backendDevice->GetVkDevice();
+ }
+ 
++VkPhysicalDevice GetVkPhysicalDevice(WGPUDevice device) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    return static_cast<PhysicalDevice*>(backendDevice->GetPhysicalDevice())->GetVkPhysicalDevice();
++}
++
++VkImage GetVkImage(WGPUTexture texture) {
++    Texture* backendTexture = ToBackend(FromAPI(texture));
++    return backendTexture != nullptr ? backendTexture->GetHandle() : VK_NULL_HANDLE;
++}
++
++VkImageView GetVkImageView(WGPUTextureView view) {
++    TextureView* backendView = ToBackend(FromAPI(view));
++    return backendView != nullptr ? backendView->GetHandle() : VK_NULL_HANDLE;
++}
++
++uint32_t GetQueueFamilyIndex(WGPUDevice device) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    return backendDevice->GetGraphicsQueueFamily();
++}
++
++PFN_vkVoidFunction GetDeviceProcAddr(WGPUDevice device, const char* pName) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    return backendDevice->fn.GetDeviceProcAddr(backendDevice->GetVkDevice(), pName);
++}
++
++VkQueue GetAppVkQueue(WGPUDevice device) {
++    Device* backendDevice = ToBackend(FromAPI(device));
++    VkQueue queue = VK_NULL_HANDLE;
++    backendDevice->fn.GetDeviceQueue(backendDevice->GetVkDevice(),
++                                     backendDevice->GetGraphicsQueueFamily(), 1, &queue);
++    return queue;
++}
++
++void RequestAdditionalInstanceExtensions(const char* const* names, uint32_t count) {
++    AddExtensionNames(GetInstanceExtensionRegistry(), names, count);
++}
++
++void RequestAdditionalDeviceExtensions(const char* const* names, uint32_t count) {
++    AddExtensionNames(GetDeviceExtensionRegistry(), names, count);
++}
++
++void RequestAppVkQueue(bool enable) {
++    std::lock_guard<std::mutex> lock(GetRequestRegistryMutex());
++    GetAppVkQueueRegistry() = enable;
++}
++
++const std::vector<std::string>& GetRequestedInstanceExtensions() {
++    return GetInstanceExtensionRegistry();
++}
++
++const std::vector<std::string>& GetRequestedDeviceExtensions() {
++    return GetDeviceExtensionRegistry();
++}
++
++bool IsAppVkQueueRequested() {
++    return GetAppVkQueueRegistry();
++}
++
+ DAWN_NATIVE_EXPORT PFN_vkVoidFunction GetInstanceProcAddr(WGPUDevice device, const char* pName) {
+     Device* backendDevice = ToBackend(FromAPI(device));
+     return (*backendDevice->fn.GetInstanceProcAddr)(backendDevice->GetVkInstance(), pName);
+--- a/src/dawn/native/vulkan/BackendVk.cpp
++++ b/src/dawn/native/vulkan/BackendVk.cpp
+@@ -486,6 +486,38 @@
+         extensionNames.push_back(info.name);
+     }
+ 
++    // Append any extensions explicitly requested by the application, but only those advertised by
++    // the driver's instance. This keeps an unsupported request from making vkCreateInstance fail
++    // and leaves the behavior unchanged when nothing was requested. The appended pointers stay
++    // valid because the registry owns the underlying std::strings for the process lifetime.
++    const std::vector<std::string>& appRequestedExtensions = GetRequestedInstanceExtensions();
++    if (!appRequestedExtensions.empty()) {
++        uint32_t availableExtensionCount = 0;
++        if (mFunctions.EnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount,
++                                                            nullptr) == VK_SUCCESS) {
++            std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
++            if (mFunctions.EnumerateInstanceExtensionProperties(
++                    nullptr, &availableExtensionCount, availableExtensions.data()) == VK_SUCCESS) {
++                for (const std::string& requested : appRequestedExtensions) {
++                    bool alreadyRequested =
++                        std::any_of(extensionNames.begin(), extensionNames.end(),
++                                    [&](const char* name) { return requested == name; });
++                    if (alreadyRequested) {
++                        continue;
++                    }
++                    bool isAdvertised =
++                        std::any_of(availableExtensions.begin(), availableExtensions.end(),
++                                    [&](const VkExtensionProperties& extension) {
++                                        return requested == extension.extensionName;
++                                    });
++                    if (isAdvertised) {
++                        extensionNames.push_back(requested.c_str());
++                    }
++                }
++            }
++        }
++    }
++
+     VkApplicationInfo appInfo;
+     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+     appInfo.pNext = nullptr;
+--- a/src/dawn/native/vulkan/DeviceVk.cpp
++++ b/src/dawn/native/vulkan/DeviceVk.cpp
+@@ -457,6 +457,17 @@
+         extensionNames.push_back(info.name);
+     }
+ 
++    // Append any extensions explicitly requested by the application, deduplicated against the ones
++    // Dawn already enables. The appended pointers stay valid because the registry owns the
++    // underlying std::strings for the process lifetime.
++    for (const std::string& requested : GetRequestedDeviceExtensions()) {
++        bool alreadyRequested = std::any_of(extensionNames.begin(), extensionNames.end(),
++                                            [&](const char* name) { return requested == name; });
++        if (!alreadyRequested) {
++            extensionNames.push_back(requested.c_str());
++        }
++    }
++
+     // Some device features can only be enabled using a VkPhysicalDeviceFeatures2 struct, which
+     // is promoted as a core API in Vulkan 1.1.
+     VkPhysicalDeviceFeatures2 features2 = {};
+@@ -748,17 +759,21 @@
+         mMainQueueFamily = universalQueueFamily;
+     }
+ 
+-    // Choose to create a single universal queue
++    // Choose to create a single universal queue. If the application reserved a second queue for
++    // itself, create two queues in the same family and expose index 1 via GetAppVkQueue; Dawn only
++    // ever submits to index 0.
+     std::vector<VkDeviceQueueCreateInfo> queuesToRequest;
+     float zero = 0.0f;
++    float priorities[2] = {0.0f, 0.0f};
++    bool requestAppQueue = IsAppVkQueueRequested();
+     {
+         VkDeviceQueueCreateInfo queueCreateInfo;
+         queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+         queueCreateInfo.pNext = nullptr;
+         queueCreateInfo.flags = 0;
+         queueCreateInfo.queueFamilyIndex = static_cast<uint32_t>(mMainQueueFamily);
+-        queueCreateInfo.queueCount = 1;
+-        queueCreateInfo.pQueuePriorities = &zero;
++        queueCreateInfo.queueCount = requestAppQueue ? 2 : 1;
++        queueCreateInfo.pQueuePriorities = requestAppQueue ? priorities : &zero;
+ 
+         queuesToRequest.push_back(queueCreateInfo);
+     }

@@ -1,0 +1,212 @@
+diff --git a/include/aurora/gfx.hpp b/include/aurora/gfx.hpp
+index 45b723d..a06a418 100644
+--- a/include/aurora/gfx.hpp
++++ b/include/aurora/gfx.hpp
+@@ -133,6 +133,41 @@ void unregister_encoder_task_type(EncoderTaskId type) noexcept;
+ /// is open.
+ bool push_encoder_task(EncoderTaskId type, const void* payload, size_t payloadSize);
+ 
++/// A texture (and its view) to blit to the swapchain in place of the scene.
++struct PostProcessTarget {
++  wgpu::Texture texture;
++  wgpu::TextureView view;
++  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
++  uint32_t width = 0;
++  uint32_t height = 0;
++};
++
++/// Invoked on the render worker immediately before the present blit, after the
++/// scene's command encoder has been finished and submitted. The implementation
++/// is responsible for making the scene inputs GPU-ready (e.g. vkDeviceWaitIdle
++/// via the Dawn device) before reading them. Both the textures and their views
++/// are passed so a backend bridge can obtain the underlying native images
++/// (e.g. `VkImage`) as well as the Dawn views. Return a target to present, or an
++/// empty target (`view` == nullptr) to present the scene unmodified.
++using ScenePostProcessFn = PostProcessTarget (*)(void* userdata, const wgpu::Texture& sceneColorTexture,
++                                                 const wgpu::TextureView& sceneColor,
++                                                 const wgpu::Texture& sceneDepthTexture,
++                                                 const wgpu::TextureView& sceneDepth, uint32_t width, uint32_t height);
++
++/// Registers (or clears, with a null fn) a hook that may replace the scene when
++/// it is blitted to the swapchain. Set from the game thread; read on the render
++/// worker. Pass nullptr to restore the default present path.
++void set_scene_post_process(ScenePostProcessFn fn, void* userdata);
++
++/// Sets the sub-pixel projection jitter, in render-pixel units, applied to
++/// perspective projections on subsequently recorded draws. Set once per frame
++/// by the renderer; (0, 0) disables jitter (the default). The value is in the
++/// same render-pixel space as a temporal upscaler's jitter input (e.g. NGX
++/// `InJitterOffsetX/Y`) and is intended to be fed both from the same source.
++/// Orthographic projections (HUD/UI, shadow maps) are never jittered. Set from
++/// the game thread; read on the render worker.
++void set_projection_jitter(float x, float y);
++
+ /// Append transient data to the shared per-frame streaming buffers. Returned
+ /// ranges are valid for the current frame only. Returns an empty Range (with a
+ /// warning) outside an active recording frame.
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index 9430842..24404a2 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -311,8 +311,40 @@ void end_frame() noexcept {
+       if (rmlBindGroup && !rmlOverlay) {
+         presentBindGroup = rmlBindGroup;
+       } else {
+-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
+-        presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
++        const auto postProcess = gfx::detail::scene_post_process();
++        if (postProcess.fn != nullptr) {
++          // Flush the scene into its own submission so the hook can consume it.
++          {
++            const wgpu::CommandBufferDescriptor sceneDescriptor{.label = "Scene command buffer"};
++            const auto sceneBuffer = encoder.Finish(&sceneDescriptor);
++            {
++              ZoneScopedN("Queue Submit");
++              g_queue.Submit(1, &sceneBuffer);
++            }
++          }
++          const auto& source = webgpu::present_source();
++          const auto target =
++              postProcess.fn(postProcess.userdata, source.texture, source.view, webgpu::g_depthBuffer.texture,
++                             webgpu::g_depthBuffer.view, source.size.width, source.size.height);
++          constexpr wgpu::CommandEncoderDescriptor presentEncoderDescriptor{.label = "Redraw command buffer"};
++          encoder = g_device.CreateCommandEncoder(&presentEncoderDescriptor);
++          if (target.view) {
++            const webgpu::TextureWithSampler targetSource{
++                .texture = target.texture,
++                .view = target.view,
++                .size = {target.width, target.height, 1},
++                .format = target.format,
++                .sampler = source.sampler,
++            };
++            presentBindGroup = webgpu::create_copy_bind_group(targetSource);
++          } else {
++            const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
++            presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
++          }
++        } else {
++          const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
++          presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
++        }
+       }
+       {
+         const std::array attachments{
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+index e005a60..818bcfc 100644
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -56,6 +56,15 @@ uint64_t g_nextFrameId = 1;
+ render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
+ render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
+ 
++std::atomic<ScenePostProcessFn> g_scenePostProcess{nullptr};
++std::atomic<void*> g_scenePostProcessUserdata{nullptr};
++
++// Sub-pixel projection jitter, in render-pixel units. Written on the game
++// thread via gfx::set_projection_jitter and read on the render worker in the GX
++// uniform path. Set once per frame; (0, 0) means no jitter.
++std::atomic<float> g_projectionJitterX{0.f};
++std::atomic<float> g_projectionJitterY{0.f};
++
+ struct RuntimeDrawType {
+   std::string label;
+   DrawCallback draw = nullptr;
+@@ -381,6 +390,32 @@ void unregister_encoder_task_type(EncoderTaskId type) noexcept {
+   g_freeEncoderTaskTypeSlots.push_back(idx);
+ }
+ 
++void set_scene_post_process(ScenePostProcessFn fn, void* userdata) {
++  g_scenePostProcessUserdata.store(userdata, std::memory_order_relaxed);
++  g_scenePostProcess.store(fn, std::memory_order_release);
++}
++
++void set_projection_jitter(float x, float y) {
++  g_projectionJitterX.store(x, std::memory_order_relaxed);
++  g_projectionJitterY.store(y, std::memory_order_relaxed);
++}
++
++namespace detail {
++ScenePostProcess scene_post_process() noexcept {
++  return {
++      .fn = g_scenePostProcess.load(std::memory_order_acquire),
++      .userdata = g_scenePostProcessUserdata.load(std::memory_order_relaxed),
++  };
++}
++
++ProjectionJitter projection_jitter() noexcept {
++  return {
++      .x = g_projectionJitterX.load(std::memory_order_relaxed),
++      .y = g_projectionJitterY.load(std::memory_order_relaxed),
++  };
++}
++} // namespace detail
++
+ void initialize() {
+   g_frameIndex = 0;
+   g_processEventsQueued.store(false, std::memory_order_release);
+diff --git a/lib/gfx/frame.hpp b/lib/gfx/frame.hpp
+index 0b86ffe..2db15f3 100644
+--- a/lib/gfx/frame.hpp
++++ b/lib/gfx/frame.hpp
+@@ -28,6 +28,24 @@ struct RegisteredEncoderTaskType {
+ std::optional<RegisteredDrawType> find_runtime_draw_type(DrawTypeId id);
+ std::optional<RegisteredEncoderTaskType> find_runtime_encoder_task_type(EncoderTaskId id);
+ 
++struct ScenePostProcess {
++  ScenePostProcessFn fn = nullptr;
++  void* userdata = nullptr;
++};
++
++/// Reads the current scene post-process hook registered via
++/// aurora::gfx::set_scene_post_process. Intended for the present path.
++ScenePostProcess scene_post_process() noexcept;
++
++struct ProjectionJitter {
++  float x = 0.f;
++  float y = 0.f;
++};
++
++/// Reads the current sub-pixel projection jitter (render-pixel units) set via
++/// aurora::gfx::set_projection_jitter. Intended for the GX uniform path.
++ProjectionJitter projection_jitter() noexcept;
++
+ } // namespace aurora::gfx::detail
+ 
+ namespace aurora::gfx {
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+index c74bd6d..263ff97 100644
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -1,5 +1,6 @@
+ #include "shader_info.hpp"
+ 
++#include "../gfx/frame.hpp"
+ #include "../gfx/recording.hpp"
+ 
+ #include <cmath>
+@@ -395,6 +396,25 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
+   } else {
+     proj.m2 = proj.m2 + proj.m3;
+   }
++  const auto jitter = gfx::detail::projection_jitter();
++  if (g_gxState.projType == GX_PERSPECTIVE && (jitter.x != 0.f || jitter.y != 0.f)) {
++    // Sub-pixel projection jitter for temporal AA (DLAA/DLSS). Only perspective
++    // projections are jittered; orthographic (HUD/UI, shadow maps) are left
++    // alone. g_gxState.proj is the GX perspective projection (rows m0..m3), so
++    // its x/y lens-shift coefficients are m0[2]/m1[2] (m2 is the clip-Z row).
++    // After the perspective divide by w = -z those coefficients become constant
++    // NDC offsets, so a render-pixel offset `j` maps to a coefficient delta of
++    // -2 * j / resolution (NDC spans 2 units across the render target; the sign
++    // follows from w = -z). This matches the NVSDK convention: NGX
++    // InJitterOffsetX/Y are in render pixels and are fed the same `j`, so the
++    // projection jitter and the evaluator stay in lockstep.
++    const float width = g_gxState.renderViewport.width;
++    const float height = g_gxState.renderViewport.height;
++    if (width != 0.f && height != 0.f) {
++      proj.m0[2] -= jitter.x * 2.0f / width;
++      proj.m1[2] -= jitter.y * 2.0f / height;
++    }
++  }
+   buf.append(proj);
+ 
+   for (int i = 0; i < MaxPnMtx; i++) {
