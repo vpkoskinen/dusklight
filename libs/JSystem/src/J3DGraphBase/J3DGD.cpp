@@ -616,12 +616,26 @@ void J3DGDSetFogRangeAdj(GXBool enable, u16 center, GXFogAdjTable* table) {
 }
 
 void J3DFifoLoadPosMtxImm(MtxP mtx, u32 id) {
-    // Route through Aurora's GXLoadPosMtxImm so that per-object motion-vector
-    // tracking sees the source pointer. The emitted XF command is byte-for-byte
-    // identical to the raw writes below (`(id*4)|0xB0000` == XF hdr with
-    // len=11, addr=4*id), so this is behaviour-preserving when motion vectors
-    // are disabled.
+#if TARGET_PC
+    // Dusk-specific: route through Aurora's GXLoadPosMtxImm so per-object
+    // motion-vector tracking can see the source pointer. The emitted XF command
+    // is byte-for-byte identical to the raw writes in the #else branch.
     GXLoadPosMtxImm(mtx, id);
+#else
+    J3DFifoWriteXFCmdHdr(4 * id, 12);
+    J3DGXCmd1f32ptr(&mtx[0][0]);
+    J3DGXCmd1f32ptr(&mtx[0][1]);
+    J3DGXCmd1f32ptr(&mtx[0][2]);
+    J3DGXCmd1f32ptr(&mtx[0][3]);
+    J3DGXCmd1f32ptr(&mtx[1][0]);
+    J3DGXCmd1f32ptr(&mtx[1][1]);
+    J3DGXCmd1f32ptr(&mtx[1][2]);
+    J3DGXCmd1f32ptr(&mtx[1][3]);
+    J3DGXCmd1f32ptr(&mtx[2][0]);
+    J3DGXCmd1f32ptr(&mtx[2][1]);
+    J3DGXCmd1f32ptr(&mtx[2][2]);
+    J3DGXCmd1f32ptr(&mtx[2][3]);
+#endif
 }
 
 void J3DFifoLoadNrmMtxImm(MtxP mtx, u32 id) {
