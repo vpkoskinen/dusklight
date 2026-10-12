@@ -12,7 +12,7 @@ DLAA support (`DUSK_ENABLE_DLSS`). Everything else lives in the normal
 | File | Applies to | What it adds |
 |---|---|---|
 | `dawn-ngx-interop.patch` | `encounter/dawn` @ `1155e0ed531126f33a1279afa029349651ca1c93` | Exported Vulkan handle getters (`GetVkDevice`/`GetVkPhysicalDevice`/`GetQueueFamilyIndex`/`GetDeviceProcAddr`/`GetAppVkQueue`), texture getters (`GetVkImage`/`GetVkImageView`), app-provided extra instance/device extensions appended at `vkCreateInstance`/`vkCreateDevice`, and an optional second app-reserved `VkQueue`. Default behavior is unchanged when nothing is requested. |
-| `aurora-dlaa-hook.patch` | `encounter/aurora` @ `3227d76c60e1e782ca576610bce61c9e7744d8be` | `aurora::gfx::set_scene_post_process()` — a present-path hook that finishes+submits the scene, then blits a hook-returned target to the swapchain; `aurora::gfx::set_projection_jitter()` — perspective-only sub-pixel projection jitter injected at the GX uniform choke point; and an optional per-object motion-vector scene attachment (RG16F) exposed to the hook. |
+| `aurora-dlaa-hook.patch` | `encounter/aurora` @ `3227d76c60e1e782ca576610bce61c9e7744d8be` | `aurora::gfx::set_scene_post_process()` — a present-path hook that finishes+submits the scene, then blits a hook-returned target to the swapchain; `aurora::gfx::set_projection_jitter()` — perspective-only sub-pixel projection jitter injected at the GX uniform choke point; an optional per-object motion-vector scene attachment (RG16F) exposed to the hook; and a `GXSetScreenSpaceOverlay()` state (GX_AURORA subcommand `0x0044`) that excludes full-screen screen-space overlays (fade veils, framebuffer-snapshot transitions, screen filters) from the motion-vector bookkeeping — they no longer write the MV attachment, update the frame's recorded perspective projection, or receive projection jitter. |
 
 > The per-object motion-vector path also requires the parent-repo change
 > `libs/JSystem/src/J3DGraphBase/J3DGD.cpp` (routes `J3DFifoLoadPosMtxImm`
@@ -52,14 +52,24 @@ the default Dusklight preset uses GCC — both are libstdc++, so ABI-compatible)
 
 This branch has Aurora as a **git submodule** with a **local-only** commit
 (`592d908`) that is not on any remote (we must not push to `encounter/aurora`).
-Two ways to reproduce:
+The submodule's **working tree is also dirty**: the screen-space-overlay
+exclusion (see below) is layered on top of `592d908` as uncommitted changes, so
+`aurora-dlaa-hook.patch` is generated with `git -C extern/aurora diff
+3227d76c60e1e782ca576610bce61c9e7744d8be` and therefore captures **both** the
+committed DLAA work and the uncommitted overlay changes. Two ways to reproduce:
 
-* Point the submodule at the local commit (already the case on this branch), or
+* Point the submodule at the local commit and apply the working-tree changes
+  (already the case on this branch), or
 * Apply the patch onto the base commit:
   ```sh
   git -C extern/aurora checkout 3227d76c60e1e782ca576610bce61c9e7744d8be
   patch -p1 -d extern/aurora < patches/aurora-dlaa-hook.patch
   ```
+
+The screen-space-overlay exclusion adds the `GX_AURORA` subcommand
+`GX_AURORA_SET_SCREEN_SPACE_OVERLAY` (`0x0044`) and the `GXSetScreenSpaceOverlay()`
+API, and bumps `GXPipelineConfigVersion` (13 → 14) because `PipelineConfig`
+gained a `flags` field.
 
 ## 3. Build & run Dusklight with DLAA
 

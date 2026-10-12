@@ -12,6 +12,7 @@
 #include "dusk/game_clock.h"
 
 #include <algorithm>
+#include <dolphin/gx/GXAurora.h>
 #endif
 
 JUTFader::JUTFader(int x, int y, int width, int height, JUtility::TColor pColor)
@@ -91,7 +92,13 @@ void JUTFader::draw() {
     if (DUSK_IF_ELSE(color, mColor).a != 0) {
         J2DOrthoGraph orthograph;
         orthograph.setColor(DUSK_IF_ELSE(color, mColor));
+#if TARGET_PC
+        GXSetScreenSpaceOverlay(GX_TRUE);
+#endif
         orthograph.fillBox(mBox);
+#if TARGET_PC
+        GXSetScreenSpaceOverlay(GX_FALSE);
+#endif
     }
 }
 

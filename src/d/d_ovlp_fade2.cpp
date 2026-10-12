@@ -12,10 +12,14 @@
 #include "m_Do/m_Do_graphic.h"
 
 #if TARGET_PC
+#include <dolphin/gx/GXAurora.h>
 #include "m_Do/m_Do_lib.h"
 #endif
 
 void dOvlpFd2_dlst_c::draw() {
+#if TARGET_PC
+    GXSetScreenSpaceOverlay(GX_TRUE);
+#endif
     GXSetViewport(0.0f, 0.0f, FB_WIDTH, FB_HEIGHT, 0.0f, 1.0f);
     GXSetScissor(0, 0, FB_WIDTH, FB_HEIGHT);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_CLR_RGB, GX_RGBA4, 0);
@@ -116,6 +120,10 @@ void dOvlpFd2_dlst_c::draw() {
     graf_ctx->setOrtho(mDoGph_gInf_c::getMinXF(), mDoGph_gInf_c::getMinYF(),
                        mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(), -1.0f, 1.0f);
     graf_ctx->setup2D();
+
+#if TARGET_PC
+    GXSetScreenSpaceOverlay(GX_FALSE);
+#endif
 }
 
 dOvlpFd2_c::dOvlpFd2_c() {

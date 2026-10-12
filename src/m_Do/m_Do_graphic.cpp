@@ -56,6 +56,7 @@
 #include "helpers/endian.h"
 #include "helpers/gx_helper.h"
 
+#include <dolphin/gx/GXAurora.h>
 #include <aurora/lib/window.hpp>
 #include <SDL3/SDL_video.h>
 #include <tracy/Tracy.hpp>
@@ -429,6 +430,9 @@ void mDoGph_gInf_c::fadeOut(f32 fadeSpeed) {
 
 void darwFilter(GXColor matColor) {
     ZoneScoped;
+#if TARGET_PC
+    GXSetScreenSpaceOverlay(GX_TRUE);
+#endif
     GXSetNumChans(1);
     GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_REG, GX_SRC_REG, GX_LIGHT_NULL, GX_DF_NONE,
                   GX_AF_NONE);
@@ -472,6 +476,9 @@ void darwFilter(GXColor matColor) {
     GXPosition3s8(1, 1, -5);
     GXPosition3s8(0, 1, -5);
     GXEnd();
+#if TARGET_PC
+    GXSetScreenSpaceOverlay(GX_FALSE);
+#endif
 }
 
 void mDoGph_gInf_c::calcFade() {
