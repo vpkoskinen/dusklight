@@ -73,6 +73,33 @@ build/{preset}/Dusklight.app/Contents/MacOS/Dusklight --dvd /path/to/game.iso
 
 Supported disc image formats: ISO (GCM), RVZ, WIA, WBFS, CISO, GCZ.
 
+### DLAA / DLSS (experimental, default OFF)
+
+NVIDIA DLAA (NGX) lives behind `DUSK_ENABLE_DLSS` (**default OFF**; the default
+build has no NVIDIA dependency). It needs two out-of-tree layers, both tracked in
+`patches/` (+ `patches/README.md`): a patched **Aurora** submodule and a patched
+**prebuilt Dawn** package (into gitignored `build/`).
+
+```sh
+./tools/fetch_dlss_sdk.sh                 # SDK headers + loader stub -> build/dlss_sdk
+cmake -S . -B build/linux-dlss -G Ninja \
+  -DDUSK_ENABLE_DLSS=ON -DDUSK_DLSS_SDK_DIR="$PWD/build/dlss_sdk" \
+  -DAURORA_DAWN_PROVIDER=package \
+  -DAURORA_DAWN_PACKAGE_URL="file://$PWD/build/dawn-ngx/dawn-linux-x86_64.tar.gz"
+cmake --build build/linux-dlss -j"$(nproc)"
+# NGX scans the *executable's* directory for the snippet, not LD_LIBRARY_PATH:
+ln -sf "$PWD/build/dlss_sdk/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.1" \
+       build/linux-dlss/libnvidia-ngx-dlss.so
+build/linux-dlss/dusklight --backend vulkan <game.rvz>   # Video -> Anti-Aliasing -> DLAA
+```
+
+Gotchas: link the SDK's `libnvsdk_ngx.a` loader stub instead of `dlsym`-ing the
+runtime; `CreateFeature1` needs a live recording command buffer; screen-space
+overlays (fade veils, screen filters) must be wrapped in
+`GXSetScreenSpaceOverlay()` or they corrupt DLAA motion vectors; Aurora's
+`PipelineConfig` must stay padding-free (`has_unique_object_representations`
+static_assert) and `GXPipelineConfigVersion` must be bumped when it changes.
+
 ---
 
 ## Git Workflow
@@ -184,6 +211,12 @@ or similar macros. See `JKRHeap.h` for the full list.
 - **CMake Variants:** `cmake-variants.yaml` and `CMakePresets.json` provide
   IDE integration presets. CLion and VS Code can load these automatically.
 - **Submodules:** Initialize with `git submodule update --init --recursive`.
+  Note: the tree calls Aurora APIs added by `patches/aurora-dlaa-hook.patch`, so
+  a pristine `extern/aurora` will not link — apply that patch first (see
+  `patches/README.md`).
+- **Local notes:** `CONTEXT.md` (live handoff) and `PLAN.md` (feature plan) are
+  untracked, gitignored agent notes — keep them out of commits and out of
+  `custom`/upstream.
 - **Nix:** A `flake.nix` / `flake.lock` are provided for Nix-based development.
 - **Formatting:** `.clang-format`, `.flake8` exist for code styling.
 - **PCH:** The project uses a precompiled header (`include/dusk_pch.hpp`).

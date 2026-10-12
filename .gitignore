@@ -41,6 +41,10 @@ compile_commands.json
 *.exe
 *.zip
 
+# Local agent notes (handoff/plan; never commit)
+CONTEXT.md
+PLAN.md
+
 # MacOS
 .DS_Store
 
