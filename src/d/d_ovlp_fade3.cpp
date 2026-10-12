@@ -27,7 +27,7 @@ void dDlst_snapShot_c::draw() {
 }
 
 void dOvlpFd3_dlst_c::draw() {
-#if TARGET_PC
+#if TARGET_PC && DUSK_ENABLE_DLSS
     GXSetScreenSpaceOverlay(GX_TRUE);
 #endif
     GXSetViewport(0.0f, 0.0f, FB_WIDTH, FB_HEIGHT, 0.0f, 1.0f);
@@ -133,7 +133,7 @@ void dOvlpFd3_dlst_c::draw() {
                        mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(), -1.0f, 1.0f);
     graf_ctx->setup2D();
 
-#if TARGET_PC
+#if TARGET_PC && DUSK_ENABLE_DLSS
     GXSetScreenSpaceOverlay(GX_FALSE);
 #endif
 }

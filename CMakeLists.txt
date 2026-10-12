@@ -94,7 +94,10 @@ option(DUSK_GFX_DEBUG_GROUPS "Report debug groups to the native graphics API" ${
 option(DUSK_ENABLE_CODE_MODS "Enable code mods" ON)
 option(DUSK_ENABLE_OPUS "Enable loading Opus audio files for mods" OFF)
 option(DUSK_ENABLE_DLSS "Enable NVIDIA DLSS/DLAA (NGX) support" OFF)
+option(DUSK_AURORA_PATCH "Apply patches/aurora-dlaa-hook.patch to extern/aurora (required for DUSK_ENABLE_DLSS builds)" ON)
 set(DUSK_DLSS_SDK_DIR "" CACHE PATH "Path to the NVIDIA DLSS SDK (contains include/ and lib/Linux_x86_64/)")
+
+include(cmake/PatchAurora.cmake)
 
 if (DUSK_ENABLE_DLSS)
     if (NOT DUSK_DLSS_SDK_DIR)
@@ -108,6 +111,18 @@ if (DUSK_ENABLE_DLSS)
                 "DUSK_DLSS_SDK_DIR='${DUSK_DLSS_SDK_DIR}' does not contain include/nvsdk_ngx.h.\n"
                 "Run tools/fetch_dlss_sdk.sh to download the NVIDIA DLSS SDK, then "
                 "configure with -DDUSK_DLSS_SDK_DIR=<path>.")
+    endif ()
+    # The DLAA Aurora APIs live in patches/aurora-dlaa-hook.patch, not in the
+    # upstream submodule pin. Apply it now (configure time, before the sources
+    # are read at build time); the default build never reaches this branch and
+    # therefore needs no patching.
+    if (DUSK_AURORA_PATCH)
+        dusk_apply_aurora_patch()
+    else ()
+        message(WARNING
+                "DUSK_AURORA_PATCH is OFF: extern/aurora will NOT be patched. A "
+                "DUSK_ENABLE_DLSS build will fail to compile/link unless the patch "
+                "(patches/aurora-dlaa-hook.patch) has been applied by hand.")
     endif ()
 endif ()
 

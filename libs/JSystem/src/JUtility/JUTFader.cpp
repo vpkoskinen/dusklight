@@ -92,11 +92,11 @@ void JUTFader::draw() {
     if (DUSK_IF_ELSE(color, mColor).a != 0) {
         J2DOrthoGraph orthograph;
         orthograph.setColor(DUSK_IF_ELSE(color, mColor));
-#if TARGET_PC
+#if TARGET_PC && DUSK_ENABLE_DLSS
         GXSetScreenSpaceOverlay(GX_TRUE);
 #endif
         orthograph.fillBox(mBox);
-#if TARGET_PC
+#if TARGET_PC && DUSK_ENABLE_DLSS
         GXSetScreenSpaceOverlay(GX_FALSE);
 #endif
     }

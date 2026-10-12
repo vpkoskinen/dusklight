@@ -430,7 +430,7 @@ void mDoGph_gInf_c::fadeOut(f32 fadeSpeed) {
 
 void darwFilter(GXColor matColor) {
     ZoneScoped;
-#if TARGET_PC
+#if TARGET_PC && DUSK_ENABLE_DLSS
     GXSetScreenSpaceOverlay(GX_TRUE);
 #endif
     GXSetNumChans(1);
@@ -476,7 +476,7 @@ void darwFilter(GXColor matColor) {
     GXPosition3s8(1, 1, -5);
     GXPosition3s8(0, 1, -5);
     GXEnd();
-#if TARGET_PC
+#if TARGET_PC && DUSK_ENABLE_DLSS
     GXSetScreenSpaceOverlay(GX_FALSE);
 #endif
 }
