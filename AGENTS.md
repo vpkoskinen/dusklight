@@ -76,9 +76,12 @@ Supported disc image formats: ISO (GCM), RVZ, WIA, WBFS, CISO, GCZ.
 ### DLAA / DLSS (experimental, default OFF)
 
 NVIDIA DLAA (NGX) lives behind `DUSK_ENABLE_DLSS` (**default OFF**; the default
-build has no NVIDIA dependency). It needs two out-of-tree layers, both tracked in
-`patches/` (+ `patches/README.md`): a patched **Aurora** submodule and a patched
-**prebuilt Dawn** package (into gitignored `build/`).
+build has no NVIDIA dependency and needs **no** patching — a pristine
+`extern/aurora` checkout builds it). It needs two out-of-tree layers, both
+tracked in `patches/` (+ `patches/README.md`): a patched **Aurora** (delivered
+as `aurora-dlaa-hook.patch`, applied automatically by CMake when
+`DUSK_ENABLE_DLSS=ON`) and a patched **prebuilt Dawn** package (into gitignored
+`build/`).
 
 ```sh
 ./tools/fetch_dlss_sdk.sh                 # SDK headers + loader stub -> build/dlss_sdk
@@ -211,9 +214,9 @@ or similar macros. See `JKRHeap.h` for the full list.
 - **CMake Variants:** `cmake-variants.yaml` and `CMakePresets.json` provide
   IDE integration presets. CLion and VS Code can load these automatically.
 - **Submodules:** Initialize with `git submodule update --init --recursive`.
-  Note: the tree calls Aurora APIs added by `patches/aurora-dlaa-hook.patch`, so
-  a pristine `extern/aurora` will not link — apply that patch first (see
-  `patches/README.md`).
+  The Aurora gitlink is pinned at upstream; the DLAA changes are applied by
+  CMake from `patches/aurora-dlaa-hook.patch` **only** for `DUSK_ENABLE_DLSS`
+  builds (see `patches/README.md`). Default builds use a pristine submodule.
 - **Local notes:** `CONTEXT.md` (live handoff) and `PLAN.md` (feature plan) are
   untracked, gitignored agent notes — keep them out of commits and out of
   `custom`/upstream.

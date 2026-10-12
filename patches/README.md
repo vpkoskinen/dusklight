@@ -50,26 +50,45 @@ the default Dusklight preset uses GCC — both are libstdc++, so ABI-compatible)
 
 ## 2. Aurora
 
-This branch has Aurora as a **git submodule** with a **local-only** commit
-(`592d908`) that is not on any remote (we must not push to `encounter/aurora`).
-The submodule's **working tree is also dirty**: the screen-space-overlay
-exclusion (see below) is layered on top of `592d908` as uncommitted changes, so
-`aurora-dlaa-hook.patch` is generated with `git -C extern/aurora diff
-3227d76c60e1e782ca576610bce61c9e7744d8be` and therefore captures **both** the
-committed DLAA work and the uncommitted overlay changes. Two ways to reproduce:
+Aurora is a **git submodule pinned at the upstream commit**
+`3227d76c60e1e782ca576610bce61c9e7744d8be` (`encounter/aurora`) — there is no
+local-only fork of the submodule. The DLAA changes are delivered purely as the
+tracked patch `aurora-dlaa-hook.patch`, which is a `git diff` of the upstream
+pin against the patched tree.
 
-* Point the submodule at the local commit and apply the working-tree changes
-  (already the case on this branch), or
-* Apply the patch onto the base commit:
-  ```sh
-  git -C extern/aurora checkout 3227d76c60e1e782ca576610bce61c9e7744d8be
-  patch -p1 -d extern/aurora < patches/aurora-dlaa-hook.patch
-  ```
+For `DUSK_ENABLE_DLSS=ON` builds CMake **applies the patch automatically at
+configure time** (see `cmake/PatchAurora.cmake`, invoked from the top-level
+`CMakeLists.txt`); the submodule then shows as dirty (`git submodule status`
+prints `+`/`-`, and `git status` reports "modified content") — that is expected
+and intended. The default build (`DUSK_ENABLE_DLSS=OFF`) never touches the
+submodule and works against a pristine checkout.
 
-The screen-space-overlay exclusion adds the `GX_AURORA` subcommand
+To apply it by hand instead:
+
+```sh
+git -C extern/aurora checkout 3227d76c60e1e782ca576610bce61c9e7744d8be
+patch -p1 -d extern/aurora < patches/aurora-dlaa-hook.patch
+```
+
+To re-roll the patch after editing the submodule:
+
+```sh
+git -C extern/aurora diff 3227d76c60e1e782ca576610bce61c9e7744d8be \
+  > patches/aurora-dlaa-hook.patch
+```
+
+CMake skips the patch if it is already applied (a reverse-apply check
+succeeds), so re-running configure is safe. `-DDUSK_AURORA_PATCH=OFF` skips it
+entirely (for debugging); a `DUSK_ENABLE_DLSS` build will then fail to compile
+unless the patch was applied by hand.
+
+The patch adds the `GX_AURORA` subcommand
 `GX_AURORA_SET_SCREEN_SPACE_OVERLAY` (`0x0044`) and the `GXSetScreenSpaceOverlay()`
 API, and bumps `GXPipelineConfigVersion` (13 → 14) because `PipelineConfig`
-gained a `flags` field.
+gained a `flags` field. The Dusk-side call sites are all gated on
+`#if TARGET_PC && DUSK_ENABLE_DLSS`, so the default build does not reference
+`GXSetScreenSpaceOverlay` at all.
+
 
 ## 3. Build & run Dusklight with DLAA
 
