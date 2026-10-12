@@ -21,8 +21,13 @@ DLAA support (`DUSK_ENABLE_DLSS`). Everything else lives in the normal
 
 ## 1. Dawn
 
-The patched Dawn is consumed through Aurora's **`package`** provider pointing at
-a local prebuilt tarball — no Dawn fork needs to be published.
+The patched Dawn is consumed through Aurora's **`package`** provider. The
+default source is the prebuilt tarball published as the `dawn-ngx-1`
+`--prerelease` asset on the fork
+(`https://github.com/vpkoskinen/dusklight/releases/download/dawn-ngx-1/dawn-linux-x86_64.tar.gz`),
+which the `linux-dlss` preset (see §3) points `AURORA_DAWN_PACKAGE_URL` at; no
+Dawn fork needs to be published. The steps below are how to (re)build that
+package from source if you want a local artifact.
 
 ```sh
 # a) get the pinned Dawn source
@@ -92,15 +97,30 @@ gained a `flags` field. The Dusk-side call sites are all gated on
 
 ## 3. Build & run Dusklight with DLAA
 
-```sh
-./tools/fetch_dlss_sdk.sh                       # -> build/dlss_sdk (headers + loader stub)
+The `linux-dlss` CMake preset wires everything up:
 
-cmake -S . -B build/linux-dlss -G Ninja \
-  -DDUSK_ENABLE_DLSS=ON \
-  -DDUSK_DLSS_SDK_DIR="$PWD/build/dlss_sdk" \
-  -DAURORA_DAWN_PROVIDER=package \
-  -DAURORA_DAWN_PACKAGE_URL="file://$PWD/build/dawn-ngx/dawn-linux-x86_64.tar.gz"
+```sh
+./tools/fetch_dlss_sdk.sh          # -> build/dlss_sdk (headers + loader stub)
+
+cmake --preset linux-dlss          # fetches the patched Dawn package (see below)
 cmake --build build/linux-dlss -j"$(nproc)"
+```
+
+Configure needs network access: the preset downloads the patched prebuilt Dawn
+package from the release asset
+`https://github.com/vpkoskinen/dusklight/releases/download/dawn-ngx-1/dawn-linux-x86_64.tar.gz`
+(a `--prerelease` build artifact on the fork — **not** a Dusklight release; see
+the release notes for its sha256, Dawn commit and license). This is the
+equivalent of the previous hand-written
+`-DDUSK_ENABLE_DLSS=ON -DDUSK_DLSS_SDK_DIR=… -DAURORA_DAWN_PROVIDER=package
+-DAURORA_DAWN_PACKAGE_URL=…` invocation.
+
+To consume a **locally built** package instead (e.g. the one produced by §1),
+override the URL:
+
+```sh
+cmake --preset linux-dlss \
+  -DAURORA_DAWN_PACKAGE_URL="file://$PWD/build/dawn-ngx/dawn-linux-x86_64.tar.gz"
 ```
 
 NGX finds the DLSS runtime snippet (`libnvidia-ngx-dlss.so`) by scanning the

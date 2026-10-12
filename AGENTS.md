@@ -80,15 +80,14 @@ build has no NVIDIA dependency and needs **no** patching — a pristine
 `extern/aurora` checkout builds it). It needs two out-of-tree layers, both
 tracked in `patches/` (+ `patches/README.md`): a patched **Aurora** (delivered
 as `aurora-dlaa-hook.patch`, applied automatically by CMake when
-`DUSK_ENABLE_DLSS=ON`) and a patched **prebuilt Dawn** package (into gitignored
-`build/`).
+`DUSK_ENABLE_DLSS=ON`) and a patched **prebuilt Dawn** package, fetched from the
+fork's `dawn-ngx-1` `--prerelease` release asset (a build artifact, not a
+Dusklight release). Configure therefore needs network access; override
+`AURORA_DAWN_PACKAGE_URL` with a `file://…` URL to use a local package.
 
 ```sh
 ./tools/fetch_dlss_sdk.sh                 # SDK headers + loader stub -> build/dlss_sdk
-cmake -S . -B build/linux-dlss -G Ninja \
-  -DDUSK_ENABLE_DLSS=ON -DDUSK_DLSS_SDK_DIR="$PWD/build/dlss_sdk" \
-  -DAURORA_DAWN_PROVIDER=package \
-  -DAURORA_DAWN_PACKAGE_URL="file://$PWD/build/dawn-ngx/dawn-linux-x86_64.tar.gz"
+cmake --preset linux-dlss
 cmake --build build/linux-dlss -j"$(nproc)"
 # NGX scans the *executable's* directory for the snippet, not LD_LIBRARY_PATH:
 ln -sf "$PWD/build/dlss_sdk/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.1" \

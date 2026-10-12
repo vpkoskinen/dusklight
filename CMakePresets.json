@@ -135,6 +135,24 @@
       ]
     },
     {
+      "name": "linux-dlss",
+      "displayName": "Linux DLAA/DLSS (NVIDIA NGX)",
+      "description": "Linux build with NVIDIA DLAA (NGX) enabled; consumes the patched Dawn package and needs the DLSS SDK. Run ./tools/fetch_dlss_sdk.sh first. Needs network access to fetch the Dawn package (override AURORA_DAWN_PACKAGE_URL for a local file:// package).",
+      "inherits": [
+        "linux-default-relwithdebinfo"
+      ],
+      "binaryDir": "${sourceDir}/build/linux-dlss",
+      "cacheVariables": {
+        "DUSK_ENABLE_DLSS": {
+          "type": "BOOL",
+          "value": true
+        },
+        "DUSK_DLSS_SDK_DIR": "${sourceDir}/build/dlss_sdk",
+        "AURORA_DAWN_PROVIDER": "package",
+        "AURORA_DAWN_PACKAGE_URL": "https://github.com/vpkoskinen/dusklight/releases/download/dawn-ngx-1/dawn-linux-x86_64.tar.gz"
+      }
+    },
+    {
       "name": "windows-msvc",
       "displayName": "Windows (MSVC)",
       "generator": "Ninja",
@@ -600,6 +618,12 @@
       "configurePreset": "linux-clang-relwithdebinfo",
       "description": "Linux (Clang) release build with debug info",
       "displayName": "Linux (Clang) RelWithDebInfo"
+    },
+    {
+      "name": "linux-dlss",
+      "configurePreset": "linux-dlss",
+      "description": "Linux DLAA/DLSS (NVIDIA NGX) release build with debug info",
+      "displayName": "Linux DLAA/DLSS"
     },
     {
       "name": "macos-default-debug",
