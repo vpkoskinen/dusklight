@@ -107,42 +107,54 @@ static_assert) and `GXPipelineConfigVersion` must be bumped when it changes.
 
 ## Git Workflow
 
-This repository is a **fork** of `TwilitRealm/dusklight`. The working clone
-is **read-only with respect to the upstream remote** — never push directly to
-the upstream repository.
+This repository is a **fork** of `TwilitRealm/dusklight`, and the remotes follow
+the standard fork convention:
+
+| Remote | Repository | Use |
+|---|---|---|
+| `origin` | `vpkoskinen/dusklight` — **your fork** | Push all work here. `gh` targets this repo by default. |
+| `upstream` | `TwilitRealm/dusklight` | **Read-only.** Fetch it to keep `main` current; never push. |
+
+`gh` is pinned to the fork (`git config remote.origin.gh-resolved=base`, set via
+`gh repo set-default vpkoskinen/dusklight`), so `gh release`, `gh run`, `gh pr`,
+etc. operate on your fork. Pass `-R TwilitRealm/dusklight` when you deliberately
+want to act on upstream (e.g. opening an upstream PR). The fork's default branch
+is `custom`, so a plain `git clone --recursive` of the fork builds your work.
 
 ### Branching Model
 
 | Branch | Purpose |
 |---|---|
-| `main` | Vanilla upstream copy. Kept in sync with upstream via fetch only. |
-| `custom` | Your personal tweaks and aggregated feature work. |
+| `main` | Vanilla upstream copy, kept in sync with `upstream/main` (fast-forward only). |
+| `custom` | Your integration branch; pushed to `origin/custom` and the fork's default branch. |
 | `feature/<name>` | Individual features, developed on their own branch before merging. |
 
 ### Rules
 
-1. **Never push anything** to the upstream remote. This clone is not owned by
-   you. All pushes to `origin` are prohibited.
+1. **Never push to `upstream`** — that repository is not ours. Pushes to
+   `origin` (your fork) are expected; pushing `main` there is fine too.
 
-2. **`main` stays vanilla.** Fetch `origin/main` regularly to check whether
-   upstream has updated, but do not commit changes directly to `main`.
+2. **`main` stays vanilla.** Only ever fast-forward it to `upstream/main`; never
+   commit to it directly.
 
-3. **`custom` is your integration branch.** Aggregate feature work here.
-   Each feature should be developed on its own branch first (see below), then
-   merged into `custom` when ready.
+3. **`custom` is your integration branch.** Each feature is developed on its own
+   branch first (see below), then merged into `custom` when ready and pushed.
 
 4. **Feature branches** (`feature/<name>`) are created, worked on, and tested
    independently before being merged into `custom`.
 
-5. **Rebasing `custom` onto `main`:** Periodically rebase `custom` onto the
-   latest `main` to stay in sync with upstream. **Only do this on explicit
-   user request.** Do not auto-rebase.
+5. **Rebasing `custom` onto `main`:** only on explicit user request; never
+   auto-rebase. `custom` is published, so a rebase needs
+   `git push --force-with-lease origin custom`.
 
 ### Typical Workflow
 
 ```sh
-# Fetch upstream updates (keep main in sync)
-git fetch origin
+# Keep your main current with upstream (fast-forward only)
+git fetch upstream
+git checkout main
+git merge --ff-only upstream/main
+git push origin main
 
 # Create a new feature branch from custom
 git checkout custom
@@ -150,14 +162,15 @@ git checkout -b feature/my-feature
 
 # ... develop, commit on the feature branch ...
 
-# Merge into custom when ready
+# Merge into custom and publish it to your fork
 git checkout custom
 git merge feature/my-feature
+git push origin custom
 
 # Periodically (on user request) rebase custom onto main
 git checkout custom
 git rebase main
-# Resolve conflicts if any, then continue
+git push --force-with-lease origin custom
 ```
 
 ---
@@ -235,8 +248,9 @@ or similar macros. See `JKRHeap.h` for the full list.
 | Build | `./build.sh` |
 | Configure (Linux) | `cmake --preset linux-default-relwithdebinfo` |
 | Build (all presets) | `cmake --build --preset <preset-name>` |
-| Fetch upstream | `git fetch origin` |
-| Rebase custom onto main | `git checkout custom && git rebase main` |
+| Sync `main` with upstream | `git fetch upstream && git checkout main && git merge --ff-only upstream/main` |
+| Publish work | `git push origin custom` |
+| Rebase custom onto main | `git checkout custom && git rebase main` then `git push --force-with-lease origin custom` |
 
 For full build and run instructions, see `docs/building.md`.
 For modding, see `docs/modding.md`.
